@@ -105,6 +105,8 @@ def load_env(path: Path) -> None:
 
 
 def load_config(path: Path) -> dict:
+    if not path.exists():
+        sys.exit(f"{path} not found. Copy config.example.toml to config.toml and add your searches.")
     with path.open("rb") as f:
         config = tomllib.load(f)
     if not config.get("search"):
@@ -136,7 +138,9 @@ def build_params(search: dict, window: timedelta, keywords: str) -> dict:
         "keywords": keywords,
         "location": search.get("location", ""),
         "f_TPR": f"r{int(window.total_seconds())}",
-        "sortBy": "DD",  # newest first
+        # Most relevant first. f_TPR already limits results to the time window, and relevance
+        # puts title matches ahead of jobs that only mention the words in their description.
+        "sortBy": "R",
     }
     for key, codes, param in (
         ("experience", EXPERIENCE, "f_E"),
@@ -166,8 +170,8 @@ SYNONYM_GROUPS = [
     ["frontend", "front end", "ui"],
     ["backend", "back end"],
     ["full stack", "fullstack"],
-    ["machine learning", "ml"],
-    ["artificial intelligence", "ai"],
+    ["machine learning", "ml", "apprentissage automatique"],
+    ["artificial intelligence", "ai", "intelligence artificielle"],
     ["analyst", "analytics"],
     ["scientist", "science"],
     ["qa", "quality assurance", "test", "tester", "testing"],
@@ -254,6 +258,7 @@ class TitleMatcher:
                 alts = [f'"{w}"' if re.search(r"\W", w) else w for w in self.query_terms.get(key, [token])]
                 terms.append(alts[0] if len(alts) == 1 else f"({' OR '.join(alts)})")
             parts.append(" ".join(terms))
+        parts = list(dict.fromkeys(parts))  # "Software Engineer" and "Software Developer" become one query
         return parts[0] if len(parts) == 1 else " OR ".join(f"({p})" for p in parts)
 
 
@@ -621,9 +626,10 @@ def notify(r: Report) -> bool:
     if os.environ.get("NTFY_TOPIC"):
         channels.append(("ntfy", send_ntfy))
     if not channels:
-        log("No notification channel configured in .env, so printing instead:")
+        missing = "SMTP_PASSWORD is empty" if os.environ.get("SMTP_USER") else "no email or ntfy settings"
+        log(f"Nothing sent ({missing} in .env). Found:")
         print(render_text(r), flush=True)
-        return True
+        return False
 
     delivered = False
     for name, send in channels:
