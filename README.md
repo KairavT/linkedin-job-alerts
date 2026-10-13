@@ -10,7 +10,7 @@ LinkedIn's search also matches job descriptions, so a lot of what comes back is 
 
 Searches can also be limited to one work term, like Winter 2027 (January to April). The term is read from the job title, or from the description when the title does not say, by looking for things like "Winter 2027", "Winter term", "January to April 2027", or a start date. Postings for a different term are dropped, and postings that never say when they are still get sent with a "Term not stated" label (or dropped, if `require_term` is on). Dates about school, like "graduating in Fall 2027", are ignored.
 
-Every job that gets sent is saved in `seen_jobs.json`, so the same posting is never sent twice. LinkedIn also lists the same job once for every city it is in, so those are merged into one entry. The new jobs are grouped by search and sent as an HTML email, and optionally as a phone notification through ntfy. A launchd job runs the script at the times you pick, like once or twice a day.
+Every job that gets sent is saved in `seen_jobs.json`, so the same posting is never sent twice. LinkedIn also lists the same job once for every city it is in, so those are merged into one entry. The new jobs are grouped by search and sent as an HTML email, and optionally as a phone notification through ntfy. A launchd job runs the script at the times you pick, like once or twice a day. If nothing new turns up for 3 days (`checkin_days`), it sends a short check-in email instead, so a broken setup does not look the same as a quiet week.
 
 ## Results
 On the Software Engineer Intern search in Canada, matching similar titles kept 4 of the first 20 LinkedIn results instead of 1. The extra matches were co-op and French language postings (like Stagiaire développeur(se) de logiciels, which is a software developer internship) that the exact word filter threw out. Titles like Mechanical Engineering Co-op, Software Analyst Intern, and Software Engineer, Internal Tools are still filtered out.
@@ -20,7 +20,7 @@ With the term set to Winter 2027, a week of co-op postings in Canada across four
 ## Limitations
 LinkedIn rate limits its public search after only a few quick requests. The script waits a few seconds between pages and backs off when it gets blocked. If a search still gets blocked part way through, the jobs from the pages it already loaded are kept, and a run stops after 30 minutes (`max_run_minutes`) and sends what it found. Any search that did not finish is mentioned in the email and checked again on the next run.
 
-The scraping depends on the HTML of LinkedIn's search results. If LinkedIn changes it, every search will come back empty until the selectors in `parse_jobs()` are updated.
+The scraping depends on the HTML of LinkedIn's search results. If LinkedIn changes it, the script can no longer read the listings, and it sends a warning email saying so instead of quietly finding nothing. The selectors in `parse_jobs()` (and `fetch_description()` for the term check) then need updating.
 
 The groups of similar words are written by hand and lean towards software jobs. Other kinds of titles only match on their exact words unless more groups are added in `config.toml`.
 
@@ -54,7 +54,7 @@ cp .env.example .env
 cp config.example.toml config.toml
 python3 job_alerts.py --preview
 ```
-Fill in `.env` with a Gmail address and an [app password](https://myaccount.google.com/apppasswords) (a normal Gmail password will not work), or an ntfy topic, and put the jobs to search for in `config.toml`. `--preview` opens the email in the browser without sending anything, `--dry-run` prints the results instead, and `--test-notify` sends a test alert.
+Fill in `.env` with a Gmail address and an [app password](https://myaccount.google.com/apppasswords) (a normal Gmail password will not work), or an ntfy topic, and put the jobs to search for in `config.toml`. `--preview` opens the email in the browser without sending anything, `--dry-run` prints the results instead, and `--test-notify` sends a test alert. `--lookback 1w` does a one-off catch-up over a longer time frame (here the past week), for example after the Mac was off for a few days.
 
 To run it every day at 8am:
 ```bash
