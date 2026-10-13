@@ -10,10 +10,12 @@ LinkedIn's search also matches job descriptions, so a lot of what comes back is 
 
 Searches can also be limited to one work term, like Winter 2027 (January to April). The term is read from the job title, or from the description when the title does not say, by looking for things like "Winter 2027", "Winter term", "January to April 2027", or a start date. Postings for a different term are dropped, and postings that never say when they are still get sent with a "Term not stated" label (or dropped, if `require_term` is on). Dates about school, like "graduating in Fall 2027", are ignored.
 
-Every job that gets sent is saved in `seen_jobs.json`, so the same posting is never sent twice. The new jobs are grouped by search and sent as an HTML email, and optionally as a phone notification through ntfy. A launchd job runs the script at the times you pick, like once or twice a day.
+Every job that gets sent is saved in `seen_jobs.json`, so the same posting is never sent twice. LinkedIn also lists the same job once for every city it is in, so those are merged into one entry. The new jobs are grouped by search and sent as an HTML email, and optionally as a phone notification through ntfy. A launchd job runs the script at the times you pick, like once or twice a day.
 
 ## Results
 On the Software Engineer Intern search in Canada, matching similar titles kept 4 of the first 20 LinkedIn results instead of 1. The extra matches were co-op and French language postings (like Stagiaire développeur(se) de logiciels, which is a software developer internship) that the exact word filter threw out. Titles like Mechanical Engineering Co-op, Software Analyst Intern, and Software Engineer, Internal Tools are still filtered out.
+
+With the term set to Winter 2027, a week of co-op postings in Canada across four searches came out as 18 confirmed for Winter 2027, 7 that never said when, and 10 for other terms that were dropped. Most terms came from the title, but some were only in the description, like a City of Ottawa posting whose description said "Co-op Placement - Winter Term". The term check was also tested on 34 examples (10 real postings and 24 tricky phrasings, like a Summer internship that mentions graduating in Fall 2027), and got all of them right.
 
 ## Limitations
 LinkedIn rate limits its public search after only a few quick requests. The script waits a few seconds between pages and backs off when it gets blocked. If a search still gets blocked part way through, the jobs from the pages it already loaded are kept, and a run stops after 30 minutes (`max_run_minutes`) and sends what it found. Any search that did not finish is mentioned in the email and checked again on the next run.
