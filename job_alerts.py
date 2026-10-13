@@ -35,6 +35,7 @@ from bs4 import BeautifulSoup
 
 ROOT = Path(__file__).resolve().parent
 SEEN_FILE = ROOT / "seen_jobs.json"
+STATE_FILE = ROOT / "state.json"  # when the last alert went out, for check-in emails
 SEEN_RETENTION_DAYS = 60
 
 SEARCH_URL = "https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search"
@@ -94,6 +95,7 @@ class Report:
     settings: dict
     failures: list[str]  # searches that got nothing
     partial: list[str] = field(default_factory=list)  # searches that stopped part-way
+    checkin_days: float | None = None  # set when this is a "still checking" email after a quiet stretch
 
     def groups(self) -> list[tuple[dict, list[Job]]]:
         """Each search with its new jobs, in config order."""
@@ -617,6 +619,16 @@ def save_seen(seen: dict[str, str]) -> None:
     tmp.replace(SEEN_FILE)
 
 
+def load_state() -> dict:
+    return json.loads(STATE_FILE.read_text()) if STATE_FILE.exists() else {}
+
+
+def save_state(state: dict) -> None:
+    tmp = STATE_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(state, indent=2))
+    tmp.replace(STATE_FILE)
+
+
 # -------------------------------------------------------------------------- output
 
 # Email palette (light). Dark-mode overrides live in EMAIL_CSS, keyed by class name.
@@ -679,9 +691,22 @@ def describe_search(search: dict, settings: dict) -> str:
     return " · ".join(parts)
 
 
+def days(n: float) -> str:
+    return f"{n:g} day{'' if n == 1 else 's'}"
+
+
+def checkin_note(r: Report) -> str:
+    return (f"Nothing new has matched your searches in the last {days(r.checkin_days)}. This is a check-in so "
+            "you know the alerts are still running; if even these stop arriving, look at logs/job_alerts.log.")
+
+
 def subject(r: Report) -> str:
     if not r.jobs:
-        return "LinkedIn job alerts: search failed" if r.failures else "No new LinkedIn jobs today"
+        if r.failures:
+            return "LinkedIn job alerts: search failed"
+        if r.checkin_days:
+            return f"Still checking: no new LinkedIn jobs in {days(r.checkin_days)}"
+        return "No new LinkedIn jobs today"
     counts = ", ".join(f"{s['title']} ({len(g)})" for s, g in r.groups() if g)
     return f"{plural(len(r.jobs), 'new LinkedIn job')}: {counts}"
 
@@ -716,7 +741,7 @@ def render_text(r: Report) -> str:
             lines.append("  " + " · ".join(filter(None, [j.company, where(j), j.posted, j.term, j.salary])))
             lines += [f"  {j.url}", ""]
     if not r.jobs:
-        lines.append("No new postings matched your searches.")
+        lines.append(checkin_note(r) if r.checkin_days else "No new postings matched your searches.")
     if r.failures or r.partial:
         lines += ["", failure_note(r)]
     return "\n".join(lines).rstrip() + "\n"
@@ -779,7 +804,7 @@ def section_html(search: dict, jobs: list[Job], settings: dict) -> str:
 def render_html(r: Report) -> str:
     n = len(r.jobs)
     groups = r.groups()
-    headline = plural(n, "new job") if n else "Nothing new today"
+    headline = plural(n, "new job") if n else "Still checking" if r.checkin_days else "Nothing new today"
     sub = f"{datetime.now():%A, %B} {datetime.now().day} · {plural(len(r.searches), 'search', 'searches')}"
     body = [
         f'<tr><td class="pad rule" style="padding:32px 32px 22px;border-bottom:1px solid {RULE}">'
@@ -799,7 +824,7 @@ def render_html(r: Report) -> str:
     body += [section_html(s, g, r.settings) for s, g in groups if g]
     quiet = [s["title"] for s, g in groups if not g and s["title"] not in r.failures + r.partial]
     if not n:
-        note = "No new postings matched your searches since the last alert."
+        note = checkin_note(r) if r.checkin_days else "No new postings matched your searches since the last alert."
     elif quiet:
         note = f"Nothing new for {', '.join(quiet)}."
     else:
@@ -860,7 +885,7 @@ def send_ntfy(r: Report) -> None:
     if len(r.jobs) > NTFY_MAX_LINES:
         lines.append(f"…and {len(r.jobs) - NTFY_MAX_LINES} more")
     if not r.jobs:
-        lines.append("No new postings matched your searches.")
+        lines.append(checkin_note(r) if r.checkin_days else "No new postings matched your searches.")
     if r.failures or r.partial:
         lines.append(failure_note(r))
     # Title/click go in query params rather than headers so non-ASCII text is safe.
@@ -984,12 +1009,23 @@ def main() -> int:
         print("\n" + render_text(report), flush=True)
         return 0
 
-    if report.jobs or failures or settings.get("send_when_empty", False):
+    state = load_state()
+    now = datetime.now()
+    last_alert = datetime.fromisoformat(state["last_alert"]) if "last_alert" in state else now
+    checkin_days = float(settings.get("checkin_days", 3))
+    sending = bool(report.jobs or failures or settings.get("send_when_empty", False))
+    if not sending and checkin_days and now - last_alert >= timedelta(days=checkin_days):
+        report.checkin_days = checkin_days
+        sending = True
+    if sending:
         if not notify(report):
             log("No notification went through; not marking jobs as seen so they're retried next run")
             return 1
+        state["last_alert"] = now.isoformat(timespec="seconds")
     else:
         log("Nothing new; no notification sent")
+    state.setdefault("last_alert", now.isoformat(timespec="seconds"))  # first run: start counting from now
+    save_state(state)
 
     today = date.today().isoformat()
     seen.update((i, today) for j in report.jobs for i in (j.id, *j.duplicate_ids))
