@@ -1,0 +1,34 @@
+# What to search for. Each [[search]] block is one LinkedIn job search.
+# Any option in [settings] can also be set inside a [[search]] block to override it there.
+
+[settings]
+posted_within = "24h"     # only postings newer than this: "12h", "24h", "3d", "1w"
+                          # (already-sent jobs are never repeated, so overlap between runs is harmless;
+                          #  "48h" is a safer choice if your Mac is often asleep at run time)
+max_pages = 10            # pages to scan per search, 10 listings each (fewer = gentler on rate limits)
+similar_titles = true     # also find related titles: "Software Engineer Co-op" matches
+                          # "Software Developer Intern", "SWE Internship", "Backend Engineer Co-op"...
+                          # (false = the job title must contain your exact words)
+title_must_match = true   # LinkedIn's search also matches descriptions; this keeps only jobs whose
+                          # title covers every word of the search title (or a synonym of it)
+send_when_empty = false   # also notify on days with nothing new
+exclude = []              # skip titles containing any of these words, in every search
+# Extra groups of interchangeable title words, on top of the built-in ones in job_alerts.py
+# (intern/co-op/internship/student, engineer/developer, junior/entry level/new grad, swe, ml, ...):
+# synonyms = [["designer", "ux"], ["devops", "platform", "infrastructure"]]
+
+[[search]]
+title = "Software Engineer Intern"
+location = "Canada"
+# Optional filters (leave out for "any"):
+# experience = ["internship", "entry"]       # internship, entry, associate, mid-senior, director, executive
+# job_type   = ["full-time", "internship"]   # full-time, part-time, contract, temporary, internship
+# workplace  = ["remote", "hybrid"]          # on-site, remote, hybrid
+# exclude    = ["senior", "staff"]           # skip titles containing these words (or synonyms: "senior" covers "Sr.")
+# also       = ["Data Engineer Co-op"]       # other titles to fold into this search
+
+[[search]]
+title = "Software Engineer"
+location = "United States"
+experience = ["entry"]
+exclude = ["senior", "staff", "principal", "lead", "manager", "intern"]  # "intern" also drops co-ops
