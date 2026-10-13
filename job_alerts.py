@@ -621,9 +621,10 @@ def notify(r: Report) -> bool:
     if os.environ.get("NTFY_TOPIC"):
         channels.append(("ntfy", send_ntfy))
     if not channels:
-        log("No notification channel configured in .env, so printing instead:")
+        missing = "SMTP_PASSWORD is empty" if os.environ.get("SMTP_USER") else "no email or ntfy settings"
+        log(f"Nothing sent ({missing} in .env). Found:")
         print(render_text(r), flush=True)
-        return True
+        return False
 
     delivered = False
     for name, send in channels:
