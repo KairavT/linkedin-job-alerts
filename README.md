@@ -54,7 +54,7 @@ cp .env.example .env
 cp config.example.toml config.toml
 python3 job_alerts.py --preview
 ```
-Fill in `.env` with a Gmail address and an [app password](https://myaccount.google.com/apppasswords) (a normal Gmail password will not work), or an ntfy topic, and put the jobs to search for in `config.toml`. `--preview` opens the email in the browser without sending anything, `--dry-run` prints the results instead, and `--test-notify` sends a test alert. `--lookback 1w` does a one-off catch-up over a longer time frame (here the past week), for example after the Mac was off for a few days.
+Fill in `.env` with a Gmail address and an [app password](https://myaccount.google.com/apppasswords) (a normal Gmail password will not work), or an ntfy topic, and put the jobs to search for in `config.toml`. `--preview` opens the email in the browser without sending anything, `--dry-run` prints the results instead, and `--test-notify` sends a test alert. `--lookback` does a one-off catch-up over the past 48 hours, for example after the Mac was off for a day or two. A different time frame can be given, like `--lookback 3d`, but the point is to spot jobs early, so it is kept short by default.
 
 To run it every day at 8am:
 ```bash
