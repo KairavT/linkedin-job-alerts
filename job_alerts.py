@@ -9,6 +9,7 @@ sent before, and delivers them by email and/or ntfy push notification.
     python job_alerts.py --dry-run      # search and print only; nothing sent or saved
     python job_alerts.py --preview      # search and open the email in your browser instead
     python job_alerts.py --test-notify  # send a sample alert to check email/ntfy setup
+    python job_alerts.py --lookback 1w  # one-off catch-up: search the past week instead of posted_within
 """
 
 from __future__ import annotations
@@ -140,13 +141,13 @@ def option(search: dict, settings: dict, key: str, default):
     return search.get(key, settings.get(key, default))
 
 
-def parse_window(value: str | int | float) -> timedelta:
+def parse_window(value: str | int | float, name: str = "posted_within") -> timedelta:
     """'24h', '3d', '1w', or a bare number of hours."""
     if isinstance(value, (int, float)):
         return timedelta(hours=value)
     m = re.fullmatch(r"\s*(\d+(?:\.\d+)?)\s*([hdw])\s*", str(value).lower())
     if not m:
-        sys.exit(f"posted_within must look like '24h', '3d' or '1w', not {value!r}")
+        sys.exit(f"{name} must look like '24h', '3d' or '1w', not {value!r}")
     amount, unit = float(m[1]), m[2]
     return timedelta(hours=amount * {"h": 1, "d": 24, "w": 168}[unit])
 
@@ -911,6 +912,8 @@ def main() -> int:
     parser.add_argument("--preview", action="store_true",
                         help="like --dry-run, but open the email in your browser instead of printing it")
     parser.add_argument("--test-notify", action="store_true", help="send a sample alert without searching")
+    parser.add_argument("--lookback", metavar="WINDOW",
+                        help="one-off catch-up: search this far back instead of posted_within, like 1w or 3d")
     args = parser.parse_args()
 
     load_env(ROOT / ".env")
@@ -926,8 +929,15 @@ def main() -> int:
     settings = config.get("settings", {})
     searches = config["search"]
     seen = load_seen()
+    if args.lookback:
+        window = parse_window(args.lookback, "--lookback")
+        settings = {**settings, "posted_within": args.lookback}
+        searches = [{**s, "posted_within": args.lookback} for s in searches]
+        log(f"Catch-up run over the {describe_window(window)}")
+    # Catch-up runs aren't time-limited: whatever they didn't get to would fall outside the next
+    # normal run's window and never be checked.
     global RUN_DEADLINE
-    RUN_DEADLINE = time.time() + float(settings.get("max_run_minutes", 30)) * 60
+    RUN_DEADLINE = None if args.lookback else time.time() + float(settings.get("max_run_minutes", 30)) * 60
 
     session = requests.Session()
     session.headers.update(HEADERS)
