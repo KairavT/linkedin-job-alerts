@@ -6,6 +6,7 @@ posted_within = "24h"     # only postings newer than this: "12h", "24h", "3d", "
                           # (already-sent jobs are never repeated, so overlap between runs is harmless;
                           #  "48h" is a safer choice if your Mac is often asleep at run time)
 max_pages = 10            # pages to scan per search, 10 listings each (fewer = gentler on rate limits)
+max_run_minutes = 30      # wrap up after this long and send what was found, even if LinkedIn keeps blocking
 similar_titles = true     # also find related titles: "Software Engineer Co-op" matches
                           # "Software Developer Intern", "SWE Internship", "Backend Engineer Co-op"...
                           # (false = the job title must contain your exact words)

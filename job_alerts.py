@@ -54,6 +54,18 @@ WORKPLACE = {"on-site": "1", "remote": "2", "hybrid": "3"}
 
 NTFY_MAX_LINES = 15
 
+# When the run has to wrap up (time.time()), from max_run_minutes. LinkedIn's rate limiting can
+# otherwise stretch a run out for hours, since every blocked request backs off for minutes.
+RUN_DEADLINE: float | None = None
+
+
+class OutOfTime(Exception):
+    """The run reached max_run_minutes."""
+
+
+def out_of_time() -> bool:
+    return RUN_DEADLINE is not None and time.time() > RUN_DEADLINE
+
 
 @dataclass
 class Job:
@@ -79,7 +91,8 @@ class Report:
     jobs: list[Job]
     searches: list[dict]
     settings: dict
-    failures: list[str]
+    failures: list[str]  # searches that got nothing
+    partial: list[str] = field(default_factory=list)  # searches that stopped part-way
 
     def groups(self) -> list[tuple[dict, list[Job]]]:
         """Each search with its new jobs, in config order."""
@@ -273,6 +286,8 @@ def fetch(session: requests.Session, url: str, params: dict | None = None) -> st
     """GET a LinkedIn page, backing off when LinkedIn rate-limits (it does, often)."""
     problem = ""
     for attempt in range(5):
+        if out_of_time():
+            raise OutOfTime("ran out of time")
         try:
             resp = session.get(url, params=params, timeout=30)
             if resp.status_code == 200:
@@ -285,6 +300,8 @@ def fetch(session: requests.Session, url: str, params: dict | None = None) -> st
         except requests.Timeout:
             problem = "timeout"
         wait = 15 * 2**attempt + random.uniform(0, 5)
+        if RUN_DEADLINE is not None and time.time() + wait > RUN_DEADLINE:
+            raise OutOfTime(f"ran out of time after {problem}")
         log(f"  LinkedIn: {problem}; retrying in {wait:.0f}s")
         time.sleep(wait)
     raise RuntimeError(f"gave up after repeated {problem}")
@@ -342,7 +359,9 @@ def merge_duplicates(jobs: list[Job]) -> list[Job]:
     return list(merged.values())
 
 
-def run_search(session: requests.Session, search: dict, settings: dict) -> list[Job]:
+def run_search(session: requests.Session, search: dict, settings: dict) -> tuple[list[Job], str | None]:
+    """Jobs matching the search, and why it stopped early (None if it didn't).
+    Raises if not even the first page could be loaded."""
     window = parse_window(option(search, settings, "posted_within", "24h"))
     max_pages = int(option(search, settings, "max_pages", 10))
     matcher = TitleMatcher(option(search, settings, "similar_titles", True), settings.get("synonyms", []))
@@ -359,10 +378,18 @@ def run_search(session: requests.Session, search: dict, settings: dict) -> list[
 
     found: dict[str, Job] = {}
     scanned = 0
+    stopped = None
     for page in range(max_pages):
         if page:
             time.sleep(random.uniform(4, 8))
-        jobs = parse_jobs(fetch(session, SEARCH_URL, {**params, "start": page * PAGE_SIZE}), search["title"])
+        try:
+            html = fetch(session, SEARCH_URL, {**params, "start": page * PAGE_SIZE})
+        except (RuntimeError, OutOfTime, requests.RequestException) as e:
+            if not page:
+                raise
+            stopped = f"stopped after page {page} of {max_pages}: {e}"
+            break
+        jobs = parse_jobs(html, search["title"])
         if not jobs:
             break
         scanned += len(jobs)
@@ -376,7 +403,9 @@ def run_search(session: requests.Session, search: dict, settings: dict) -> list[
                 continue
             found.setdefault(job.id, job)
     log(f"  scanned {scanned} listings, {len(found)} match the title filters")
-    return list(found.values())
+    if stopped:
+        log(f"  {stopped}; keeping what was found")
+    return list(found.values()), stopped
 
 
 # ------------------------------------------------------------------------ work terms
@@ -528,6 +557,8 @@ def term_label(term: tuple[str, int]) -> str:
 def fetch_description(session: requests.Session, job_id: str) -> str | None:
     try:
         html = fetch(session, JOB_URL.format(job_id))
+    except OutOfTime:
+        raise
     except Exception as e:
         log(f"  couldn't load the description of job {job_id}: {e}")
         return None
@@ -536,15 +567,24 @@ def fetch_description(session: requests.Session, job_id: str) -> str | None:
 
 
 def filter_by_term(session: requests.Session, jobs: list[Job], wanted: set[tuple[str, int]],
-                   require: bool) -> tuple[list[Job], list[Job]]:
-    """Split jobs into (kept, dropped) by work term. Reads descriptions only when titles don't say."""
+                   require: bool) -> tuple[list[Job], list[Job], int]:
+    """Split jobs into (kept, dropped) by work term, reading descriptions only when titles don't say.
+    The third value counts jobs left unchecked because the run ran out of time; they're in neither
+    list, so they aren't sent or remembered and the next run checks them."""
     today = date.today()
-    kept, dropped, unstated = [], [], 0
+    kept, dropped, unstated, unchecked = [], [], 0, 0
     for job in jobs:
         terms = find_terms(job.title, today, in_title=True)
         if not terms:
-            time.sleep(random.uniform(3, 6))
-            terms = find_terms(fetch_description(session, job.id) or "", today)
+            if unchecked:
+                unchecked += 1
+                continue
+            try:
+                time.sleep(random.uniform(3, 6))
+                terms = find_terms(fetch_description(session, job.id) or "", today)
+            except OutOfTime:
+                unchecked += 1
+                continue
         if terms & wanted:
             job.term, job.term_ok = term_label(min(terms & wanted)), True
             kept.append(job)
@@ -555,8 +595,9 @@ def filter_by_term(session: requests.Session, jobs: list[Job], wanted: set[tuple
             kept.append(job)
             unstated += 1
     label = " or ".join(term_label(t) for t in sorted(wanted))
-    log(f"  {len(kept) - unstated} for {label}, {unstated} don't say when, {len(dropped)} dropped")
-    return kept, dropped
+    log(f"  {len(kept) - unstated} for {label}, {unstated} don't say when, {len(dropped)} dropped"
+        + (f", {unchecked} left for the next run (out of time)" if unchecked else ""))
+    return kept, dropped, unchecked
 
 
 # ---------------------------------------------------------------------------- state
@@ -653,9 +694,14 @@ def preheader(r: Report) -> str:
     return ", ".join(companies[:3]) + more
 
 
-def failure_note(failures: list[str]) -> str:
-    return (f"Couldn't finish searching: {', '.join(failures)}. LinkedIn was probably rate-limiting; "
-            "anything missed will show up in the next run.")
+def failure_note(r: Report) -> str:
+    problems = []
+    if r.failures:
+        problems.append(f"couldn't search {', '.join(r.failures)}")
+    if r.partial:
+        problems.append(f"only got partway through {', '.join(r.partial)}")
+    return (f"This run {' and '.join(problems)}, usually because LinkedIn was rate-limiting. "
+            "Anything missed will show up in the next run.")
 
 
 def render_text(r: Report) -> str:
@@ -670,8 +716,8 @@ def render_text(r: Report) -> str:
             lines += [f"  {j.url}", ""]
     if not r.jobs:
         lines.append("No new postings matched your searches.")
-    if r.failures:
-        lines += ["", failure_note(r.failures)]
+    if r.failures or r.partial:
+        lines += ["", failure_note(r)]
     return "\n".join(lines).rstrip() + "\n"
 
 
@@ -743,14 +789,14 @@ def render_html(r: Report) -> str:
         f'<div class="muted" style="color:{MUTED};font-size:14px;line-height:20px;margin-top:4px">{escape(sub)}</div>'
         f'</td></tr>'
     ]
-    if r.failures:
+    if r.failures or r.partial:
         body.append(
             f'<tr><td class="pad" style="padding:20px 32px 0"><div class="warn" style="background:#fdf5e6;'
             f'border:1px solid #f0dcb4;border-radius:10px;padding:12px 14px;color:#7a4b06;font-size:13px;'
-            f'line-height:19px">{escape(failure_note(r.failures))}</div></td></tr>'
+            f'line-height:19px">{escape(failure_note(r))}</div></td></tr>'
         )
     body += [section_html(s, g, r.settings) for s, g in groups if g]
-    quiet = [s["title"] for s, g in groups if not g and s["title"] not in r.failures]
+    quiet = [s["title"] for s, g in groups if not g and s["title"] not in r.failures + r.partial]
     if not n:
         note = "No new postings matched your searches since the last alert."
     elif quiet:
@@ -814,8 +860,8 @@ def send_ntfy(r: Report) -> None:
         lines.append(f"…and {len(r.jobs) - NTFY_MAX_LINES} more")
     if not r.jobs:
         lines.append("No new postings matched your searches.")
-    if r.failures:
-        lines.append(failure_note(r.failures))
+    if r.failures or r.partial:
+        lines.append(failure_note(r))
     # Title/click go in query params rather than headers so non-ASCII text is safe.
     params = {"title": subject(r), "tags": "briefcase"}
     if len(r.jobs) == 1:
@@ -880,37 +926,47 @@ def main() -> int:
     settings = config.get("settings", {})
     searches = config["search"]
     seen = load_seen()
+    global RUN_DEADLINE
+    RUN_DEADLINE = time.time() + float(settings.get("max_run_minutes", 30)) * 60
 
     session = requests.Session()
     session.headers.update(HEADERS)
     new: dict[str, Job] = {}
     skipped: set[str] = set()  # wrong term; remembered so their descriptions aren't fetched again
-    failures = []
+    failures, partial = [], []
     for i, search in enumerate(searches):
+        if out_of_time():
+            log(f"Out of time; {search['title']!r} waits for the next run")
+            failures.append(search["title"])
+            continue
         if i:
             time.sleep(random.uniform(5, 10))
         log(f"Searching {search['title']!r} in {search.get('location') or 'any location'}")
         try:
-            jobs = run_search(session, search, settings)
+            jobs, stopped = run_search(session, search, settings)
         except Exception as e:
             log(f"  search failed: {e}")
             failures.append(search["title"])
             continue
+        if stopped:
+            partial.append(search["title"])
         fresh = merge_duplicates([j for j in jobs if j.id not in seen and j.id not in new and j.id not in skipped])
         wanted_terms = parse_terms(option(search, settings, "term", None))
         if wanted_terms and fresh:
             try:
-                fresh, dropped = filter_by_term(session, fresh, wanted_terms,
-                                                option(search, settings, "require_term", False))
+                fresh, dropped, unchecked = filter_by_term(session, fresh, wanted_terms,
+                                                           option(search, settings, "require_term", False))
             except Exception as e:
                 log(f"  term check failed: {e}")
                 failures.append(search["title"])
                 continue
-            skipped.update(i for j in dropped for i in (j.id, *j.duplicate_ids))
+            skipped.update(job_id for j in dropped for job_id in (j.id, *j.duplicate_ids))
+            if unchecked and not stopped:
+                partial.append(search["title"])
         log(f"  {len(fresh)} new since last run")
         new.update((j.id, j) for j in fresh)
 
-    report = Report(merge_duplicates(list(new.values())), searches, settings, failures)
+    report = Report(merge_duplicates(list(new.values())), searches, settings, failures, partial)
     if args.preview:
         write_preview(report)
         return 0

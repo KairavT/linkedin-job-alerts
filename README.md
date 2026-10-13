@@ -16,7 +16,7 @@ Every job that gets sent is saved in `seen_jobs.json`, so the same posting is ne
 On the Software Engineer Intern search in Canada, matching similar titles kept 4 of the first 20 LinkedIn results instead of 1. The extra matches were co-op and French language postings (like Stagiaire développeur(se) de logiciels, which is a software developer internship) that the exact word filter threw out. Titles like Mechanical Engineering Co-op, Software Analyst Intern, and Software Engineer, Internal Tools are still filtered out.
 
 ## Limitations
-LinkedIn rate limits its public search after only a few quick requests. The script waits a few seconds between pages and backs off when it gets blocked, and any search that still fails is mentioned in the email and tried again the next day.
+LinkedIn rate limits its public search after only a few quick requests. The script waits a few seconds between pages and backs off when it gets blocked. If a search still gets blocked part way through, the jobs from the pages it already loaded are kept, and a run stops after 30 minutes (`max_run_minutes`) and sends what it found. Any search that did not finish is mentioned in the email and checked again on the next run.
 
 The scraping depends on the HTML of LinkedIn's search results. If LinkedIn changes it, every search will come back empty until the selectors in `parse_jobs()` are updated.
 
