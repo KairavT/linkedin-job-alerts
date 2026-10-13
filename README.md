@@ -10,7 +10,7 @@ LinkedIn's search also matches job descriptions, so a lot of what comes back is 
 
 Searches can also be limited to one work term, like Winter 2027 (January to April). The term is read from the job title, or from the description when the title does not say, by looking for things like "Winter 2027", "Winter term", "January to April 2027", or a start date. Postings for a different term are dropped, and postings that never say when they are still get sent with a "Term not stated" label (or dropped, if `require_term` is on). Dates about school, like "graduating in Fall 2027", are ignored.
 
-Every job that gets sent is saved in `seen_jobs.json`, so the same posting is never sent twice. The new jobs are grouped by search and sent as an HTML email, and optionally as a phone notification through ntfy. A launchd job runs the script once a day.
+Every job that gets sent is saved in `seen_jobs.json`, so the same posting is never sent twice. The new jobs are grouped by search and sent as an HTML email, and optionally as a phone notification through ntfy. A launchd job runs the script at the times you pick, like once or twice a day.
 
 ## Results
 On the Software Engineer Intern search in Canada, matching similar titles kept 4 of the first 20 LinkedIn results instead of 1. The extra matches were co-op and French language postings (like Stagiaire développeur(se) de logiciels, which is a software developer internship) that the exact word filter threw out. Titles like Mechanical Engineering Co-op, Software Analyst Intern, and Software Engineer, Internal Tools are still filtered out.
@@ -24,9 +24,9 @@ The groups of similar words are written by hand and lean towards software jobs. 
 
 The term check is based on patterns in the text, so a posting that describes its dates in an unusual way can be dropped or kept by mistake. Spring is treated as both Winter and Summer, since it means January to May at most US schools and May to August at most Canadian ones.
 
-launchd only runs the script while the Mac is on. If the Mac is asleep at the scheduled time it runs when it wakes up, but if it is shut down that day is skipped, so a time frame longer than 24 hours is safer.
+The script runs on your own Mac, not on a server, so alerts only go out while the Mac is on (see How to Run). A run that is missed while the Mac is shut down is skipped, so the time frame should be longer than the gap between runs, or postings from that gap will be missed.
 
-Scraping LinkedIn goes against its User Agreement. This only reads public job listings, and only around 20 requests a day.
+Scraping LinkedIn goes against its User Agreement. This only reads public job listings, with a few dozen requests each run.
 
 ## Files
 - `job_alerts.py` searches LinkedIn, filters the results, and sends the email and notification
@@ -59,3 +59,5 @@ To run it every day at 8am:
 ./schedule.sh 8:00
 ```
 More than one time works too, like `./schedule.sh 8:00 20:00` for twice a day. `./schedule.sh --remove` stops it, and the output of each run goes to `logs/job_alerts.log`.
+
+The Mac has to be on and awake at the scheduled times for the email to arrive on time. If it is asleep (for example with the lid closed), the run happens as soon as the Mac is opened again, and if several runs were missed while it slept they are combined into one. If the Mac is shut down at a scheduled time, that run is skipped.
