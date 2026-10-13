@@ -26,7 +26,7 @@ Scraping LinkedIn goes against its User Agreement. This only reads public job li
 
 ## Files
 - `job_alerts.py` searches LinkedIn, filters the results, and sends the email and notification
-- `config.toml` the job titles, locations, time frame, and filters to search for
+- `config.example.toml` example config, copied to `config.toml` with the job titles, locations, time frame, and filters to search for
 - `schedule.sh` sets up (or removes) the daily launchd job
 - `.env.example` template for the email and ntfy settings
 
@@ -45,6 +45,7 @@ python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env
+cp config.example.toml config.toml
 python3 job_alerts.py --preview
 ```
 Fill in `.env` with a Gmail address and an [app password](https://myaccount.google.com/apppasswords) (a normal Gmail password will not work), or an ntfy topic, and put the jobs to search for in `config.toml`. `--preview` opens the email in the browser without sending anything, `--dry-run` prints the results instead, and `--test-notify` sends a test alert.

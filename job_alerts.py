@@ -105,6 +105,8 @@ def load_env(path: Path) -> None:
 
 
 def load_config(path: Path) -> dict:
+    if not path.exists():
+        sys.exit(f"{path} not found. Copy config.example.toml to config.toml and add your searches.")
     with path.open("rb") as f:
         config = tomllib.load(f)
     if not config.get("search"):
