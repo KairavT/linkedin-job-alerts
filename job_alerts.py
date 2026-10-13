@@ -136,7 +136,9 @@ def build_params(search: dict, window: timedelta, keywords: str) -> dict:
         "keywords": keywords,
         "location": search.get("location", ""),
         "f_TPR": f"r{int(window.total_seconds())}",
-        "sortBy": "DD",  # newest first
+        # Most relevant first. f_TPR already limits results to the time window, and relevance
+        # puts title matches ahead of jobs that only mention the words in their description.
+        "sortBy": "R",
     }
     for key, codes, param in (
         ("experience", EXPERIENCE, "f_E"),
@@ -254,6 +256,7 @@ class TitleMatcher:
                 alts = [f'"{w}"' if re.search(r"\W", w) else w for w in self.query_terms.get(key, [token])]
                 terms.append(alts[0] if len(alts) == 1 else f"({' OR '.join(alts)})")
             parts.append(" ".join(terms))
+        parts = list(dict.fromkeys(parts))  # "Software Engineer" and "Software Developer" become one query
         return parts[0] if len(parts) == 1 else " OR ".join(f"({p})" for p in parts)
 
 
