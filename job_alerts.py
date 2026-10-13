@@ -69,6 +69,14 @@ def out_of_time() -> bool:
     return RUN_DEADLINE is not None and time.time() > RUN_DEADLINE
 
 
+class UnreadablePage(Exception):
+    """LinkedIn sent a page, but no job listings could be read from it."""
+
+
+# Job description pages loaded this run, and how many had no description we could find.
+DESCRIPTION_PAGES = {"read": 0, "unreadable": 0}
+
+
 @dataclass
 class Job:
     id: str
@@ -96,6 +104,8 @@ class Report:
     failures: list[str]  # searches that got nothing
     partial: list[str] = field(default_factory=list)  # searches that stopped part-way
     checkin_days: float | None = None  # set when this is a "still checking" email after a quiet stretch
+    unreadable_searches: list[str] = field(default_factory=list)  # results pages we couldn't read
+    unreadable_descriptions: bool = False  # job pages loaded but none had a readable description
 
     def groups(self) -> list[tuple[dict, list[Job]]]:
         """Each search with its new jobs, in config order."""
@@ -348,6 +358,12 @@ def parse_jobs(html: str, search_title: str) -> list[Job]:
     return jobs
 
 
+def looks_unreadable(html: str) -> bool:
+    """A results page with content but no job cards we recognise. A search with no results comes back
+    nearly empty, so this points to a layout change (or a sign-in page) instead."""
+    return "<li" in html or len(html.strip()) > 2000
+
+
 def merge_duplicates(jobs: list[Job]) -> list[Job]:
     """LinkedIn lists a job once per city, and again when it's reposted. Keep one of each."""
     merged: dict[tuple[str, str], Job] = {}
@@ -394,6 +410,10 @@ def run_search(session: requests.Session, search: dict, settings: dict) -> tuple
             break
         jobs = parse_jobs(html, search["title"])
         if not jobs:
+            if looks_unreadable(html):
+                if not page:
+                    raise UnreadablePage("LinkedIn sent a results page with no job listings the script could read")
+                stopped = f"stopped after page {page} of {max_pages}: a results page couldn't be read"
             break
         scanned += len(jobs)
         for job in jobs:
@@ -566,6 +586,7 @@ def fetch_description(session: requests.Session, job_id: str) -> str | None:
         log(f"  couldn't load the description of job {job_id}: {e}")
         return None
     el = BeautifulSoup(html, "html.parser").select_one(".show-more-less-html__markup, .description__text")
+    DESCRIPTION_PAGES["read" if el else "unreadable"] += 1
     return el.get_text(" ", strip=True) if el else ""
 
 
@@ -700,8 +721,26 @@ def checkin_note(r: Report) -> str:
             "you know the alerts are still running; if even these stop arriving, look at logs/job_alerts.log.")
 
 
+def layout_note(r: Report) -> str:
+    what = []
+    if r.unreadable_searches:
+        what.append(f"the search results for {', '.join(r.unreadable_searches)}")
+    if r.unreadable_descriptions:
+        what.append("the job descriptions used for the term check")
+    return (f"LinkedIn sent pages the script couldn't read: {' and '.join(what)}. Either LinkedIn changed its "
+            "page layout or it showed a sign-in page instead of results. If this keeps happening, the parsing in "
+            "job_alerts.py (parse_jobs and fetch_description) needs updating, and jobs will be missing until then.")
+
+
+def nothing_ran_ok(r: Report) -> bool:
+    """No jobs, and that's because searches failed or couldn't be read, not because nothing matched."""
+    return not r.jobs and bool(r.failures or r.unreadable_searches)
+
+
 def subject(r: Report) -> str:
     if not r.jobs:
+        if r.unreadable_searches or r.unreadable_descriptions:
+            return "LinkedIn job alerts: couldn't read LinkedIn's pages"
         if r.failures:
             return "LinkedIn job alerts: search failed"
         if r.checkin_days:
@@ -740,8 +779,10 @@ def render_text(r: Report) -> str:
             lines.append(j.title)
             lines.append("  " + " · ".join(filter(None, [j.company, where(j), j.posted, j.term, j.salary])))
             lines += [f"  {j.url}", ""]
-    if not r.jobs:
+    if not r.jobs and not nothing_ran_ok(r):
         lines.append(checkin_note(r) if r.checkin_days else "No new postings matched your searches.")
+    if r.unreadable_searches or r.unreadable_descriptions:
+        lines += ["", layout_note(r)]
     if r.failures or r.partial:
         lines += ["", failure_note(r)]
     return "\n".join(lines).rstrip() + "\n"
@@ -804,7 +845,14 @@ def section_html(search: dict, jobs: list[Job], settings: dict) -> str:
 def render_html(r: Report) -> str:
     n = len(r.jobs)
     groups = r.groups()
-    headline = plural(n, "new job") if n else "Still checking" if r.checkin_days else "Nothing new today"
+    if n:
+        headline = plural(n, "new job")
+    elif r.unreadable_searches:
+        headline = "Couldn't read LinkedIn"
+    elif r.failures:
+        headline = "Searches didn't finish"
+    else:
+        headline = "Still checking" if r.checkin_days else "Nothing new today"
     sub = f"{datetime.now():%A, %B} {datetime.now().day} · {plural(len(r.searches), 'search', 'searches')}"
     body = [
         f'<tr><td class="pad rule" style="padding:32px 32px 22px;border-bottom:1px solid {RULE}">'
@@ -815,15 +863,19 @@ def render_html(r: Report) -> str:
         f'<div class="muted" style="color:{MUTED};font-size:14px;line-height:20px;margin-top:4px">{escape(sub)}</div>'
         f'</td></tr>'
     ]
-    if r.failures or r.partial:
+    for note, show in ((layout_note, r.unreadable_searches or r.unreadable_descriptions),
+                       (failure_note, r.failures or r.partial)):
+        if not show:
+            continue
         body.append(
             f'<tr><td class="pad" style="padding:20px 32px 0"><div class="warn" style="background:#fdf5e6;'
             f'border:1px solid #f0dcb4;border-radius:10px;padding:12px 14px;color:#7a4b06;font-size:13px;'
-            f'line-height:19px">{escape(failure_note(r))}</div></td></tr>'
+            f'line-height:19px">{escape(note(r))}</div></td></tr>'
         )
     body += [section_html(s, g, r.settings) for s, g in groups if g]
-    quiet = [s["title"] for s, g in groups if not g and s["title"] not in r.failures + r.partial]
-    if not n:
+    quiet = [s["title"] for s, g in groups
+             if not g and s["title"] not in r.failures + r.partial + r.unreadable_searches]
+    if not n and not nothing_ran_ok(r):
         note = checkin_note(r) if r.checkin_days else "No new postings matched your searches since the last alert."
     elif quiet:
         note = f"Nothing new for {', '.join(quiet)}."
@@ -884,8 +936,10 @@ def send_ntfy(r: Report) -> None:
     lines = [f"• {j.title} — {j.company}" for j in r.jobs[:NTFY_MAX_LINES]]
     if len(r.jobs) > NTFY_MAX_LINES:
         lines.append(f"…and {len(r.jobs) - NTFY_MAX_LINES} more")
-    if not r.jobs:
+    if not r.jobs and not nothing_ran_ok(r):
         lines.append(checkin_note(r) if r.checkin_days else "No new postings matched your searches.")
+    if r.unreadable_searches or r.unreadable_descriptions:
+        lines.append(layout_note(r))
     if r.failures or r.partial:
         lines.append(failure_note(r))
     # Title/click go in query params rather than headers so non-ASCII text is safe.
@@ -966,6 +1020,8 @@ def main() -> int:
 
     session = requests.Session()
     session.headers.update(HEADERS)
+    DESCRIPTION_PAGES.update(read=0, unreadable=0)
+    unreadable = []
     new: dict[str, Job] = {}
     skipped: set[str] = set()  # wrong term; remembered so their descriptions aren't fetched again
     failures, partial = [], []
@@ -979,6 +1035,10 @@ def main() -> int:
         log(f"Searching {search['title']!r} in {search.get('location') or 'any location'}")
         try:
             jobs, stopped = run_search(session, search, settings)
+        except UnreadablePage as e:
+            log(f"  {e}; LinkedIn may have changed its page layout")
+            unreadable.append(search["title"])
+            continue
         except Exception as e:
             log(f"  search failed: {e}")
             failures.append(search["title"])
@@ -1001,7 +1061,12 @@ def main() -> int:
         log(f"  {len(fresh)} new since last run")
         new.update((j.id, j) for j in fresh)
 
-    report = Report(merge_duplicates(list(new.values())), searches, settings, failures, partial)
+    unreadable_descriptions = DESCRIPTION_PAGES["read"] == 0 and DESCRIPTION_PAGES["unreadable"] >= 3
+    if unreadable_descriptions:
+        log(f"None of the {DESCRIPTION_PAGES['unreadable']} job descriptions loaded could be read; "
+            "LinkedIn may have changed its page layout")
+    report = Report(merge_duplicates(list(new.values())), searches, settings, failures, partial,
+                    unreadable_searches=unreadable, unreadable_descriptions=unreadable_descriptions)
     if args.preview:
         write_preview(report)
         return 0
@@ -1013,7 +1078,8 @@ def main() -> int:
     now = datetime.now()
     last_alert = datetime.fromisoformat(state["last_alert"]) if "last_alert" in state else now
     checkin_days = float(settings.get("checkin_days", 3))
-    sending = bool(report.jobs or failures or settings.get("send_when_empty", False))
+    sending = bool(report.jobs or failures or unreadable or unreadable_descriptions
+                   or settings.get("send_when_empty", False))
     if not sending and checkin_days and now - last_alert >= timedelta(days=checkin_days):
         report.checkin_days = checkin_days
         sending = True
@@ -1031,7 +1097,7 @@ def main() -> int:
     seen.update((i, today) for j in report.jobs for i in (j.id, *j.duplicate_ids))
     seen.update((job_id, today) for job_id in skipped)
     save_seen(seen)
-    return 1 if len(failures) == len(searches) else 0
+    return 1 if len(failures) + len(unreadable) == len(searches) else 0
 
 
 if __name__ == "__main__":

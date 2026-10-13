@@ -20,7 +20,7 @@ With the term set to Winter 2027, a week of co-op postings in Canada across four
 ## Limitations
 LinkedIn rate limits its public search after only a few quick requests. The script waits a few seconds between pages and backs off when it gets blocked. If a search still gets blocked part way through, the jobs from the pages it already loaded are kept, and a run stops after 30 minutes (`max_run_minutes`) and sends what it found. Any search that did not finish is mentioned in the email and checked again on the next run.
 
-The scraping depends on the HTML of LinkedIn's search results. If LinkedIn changes it, every search will come back empty until the selectors in `parse_jobs()` are updated.
+The scraping depends on the HTML of LinkedIn's search results. If LinkedIn changes it, the script can no longer read the listings, and it sends a warning email saying so instead of quietly finding nothing. The selectors in `parse_jobs()` (and `fetch_description()` for the term check) then need updating.
 
 The groups of similar words are written by hand and lean towards software jobs. Other kinds of titles only match on their exact words unless more groups are added in `config.toml`.
 
