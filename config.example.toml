@@ -12,6 +12,9 @@ similar_titles = true     # also find related titles: "Software Engineer Co-op" 
 title_must_match = true   # LinkedIn's search also matches descriptions; this keeps only jobs whose
                           # title covers every word of the search title (or a synonym of it)
 send_when_empty = false   # also notify on days with nothing new
+# term = "Winter 2027"    # only co-ops/internships starting in this term, read from the title or description:
+                          # Winter (Jan-Apr), Summer or Spring (May-Aug), Fall (Sep-Dec); can be a list
+# require_term = false    # true = also drop postings that don't say when they are (kept and labelled by default)
 exclude = []              # skip titles containing any of these words, in every search
 # Extra groups of interchangeable title words, on top of the built-in ones in job_alerts.py
 # (intern/co-op/internship/student, engineer/developer, junior/entry level/new grad, swe, ml, ...):

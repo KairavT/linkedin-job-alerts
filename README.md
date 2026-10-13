@@ -8,6 +8,8 @@ Each search in `config.toml` has a job title, a location, and a time frame like 
 
 LinkedIn's search also matches job descriptions, so a lot of what comes back is not actually the job you searched for. Because of this, each job title is checked against the search title, and a job is only kept if its title covers every word of the search. Similar words count as the same word, so a search for Software Engineer Co-op also finds Software Developer Intern, SWE Internship, and Backend Engineer Co-op. The same groups of similar words are used to build the LinkedIn query, joining the alternatives with OR so one request covers all of them.
 
+Searches can also be limited to one work term, like Winter 2027 (January to April). The term is read from the job title, or from the description when the title does not say, by looking for things like "Winter 2027", "Winter term", "January to April 2027", or a start date. Postings for a different term are dropped, and postings that never say when they are still get sent with a "Term not stated" label (or dropped, if `require_term` is on). Dates about school, like "graduating in Fall 2027", are ignored.
+
 Every job that gets sent is saved in `seen_jobs.json`, so the same posting is never sent twice. The new jobs are grouped by search and sent as an HTML email, and optionally as a phone notification through ntfy. A launchd job runs the script once a day.
 
 ## Results
@@ -19,6 +21,8 @@ LinkedIn rate limits its public search after only a few quick requests. The scri
 The scraping depends on the HTML of LinkedIn's search results. If LinkedIn changes it, every search will come back empty until the selectors in `parse_jobs()` are updated.
 
 The groups of similar words are written by hand and lean towards software jobs. Other kinds of titles only match on their exact words unless more groups are added in `config.toml`.
+
+The term check is based on patterns in the text, so a posting that describes its dates in an unusual way can be dropped or kept by mistake. Spring is treated as both Winter and Summer, since it means January to May at most US schools and May to August at most Canadian ones.
 
 launchd only runs the script while the Mac is on. If the Mac is asleep at the scheduled time it runs when it wakes up, but if it is shut down that day is skipped, so a time frame longer than 24 hours is safer.
 
