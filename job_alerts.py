@@ -37,6 +37,7 @@ SEEN_FILE = ROOT / "seen_jobs.json"
 SEEN_RETENTION_DAYS = 60
 
 SEARCH_URL = "https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search"
+JOB_URL = "https://www.linkedin.com/jobs-guest/jobs/api/jobPosting/{}"
 PAGE_SIZE = 10
 HEADERS = {
     "User-Agent": (
@@ -67,6 +68,8 @@ class Job:
     search: str  # title of the [[search]] that found it
     logo: str = ""
     early_applicant: bool = False
+    term: str = ""         # e.g. "Winter 2027" or "Term not stated", when filtering by term
+    term_ok: bool = False  # the posting says it's in the wanted term
 
 
 @dataclass
@@ -264,12 +267,12 @@ class TitleMatcher:
 
 # -------------------------------------------------------------------------- scraping
 
-def fetch_page(session: requests.Session, params: dict, start: int) -> str:
-    """One page of results, backing off when LinkedIn rate-limits (it does, often)."""
+def fetch(session: requests.Session, url: str, params: dict | None = None) -> str:
+    """GET a LinkedIn page, backing off when LinkedIn rate-limits (it does, often)."""
     problem = ""
     for attempt in range(5):
         try:
-            resp = session.get(SEARCH_URL, params={**params, "start": start}, timeout=30)
+            resp = session.get(url, params=params, timeout=30)
             if resp.status_code == 200:
                 return resp.text
             if resp.status_code not in (429, 500, 502, 503, 504):
@@ -343,7 +346,7 @@ def run_search(session: requests.Session, search: dict, settings: dict) -> list[
     for page in range(max_pages):
         if page:
             time.sleep(random.uniform(4, 8))
-        jobs = parse_jobs(fetch_page(session, params, page * PAGE_SIZE), search["title"])
+        jobs = parse_jobs(fetch(session, SEARCH_URL, {**params, "start": page * PAGE_SIZE}), search["title"])
         if not jobs:
             break
         scanned += len(jobs)
@@ -358,6 +361,186 @@ def run_search(session: requests.Session, search: dict, settings: dict) -> list[
             found.setdefault(job.id, job)
     log(f"  scanned {scanned} listings, {len(found)} match the title filters")
     return list(found.values())
+
+
+# ------------------------------------------------------------------------ work terms
+
+# Co-op terms, Canadian style. With `term` set, a posting is kept if its title (or, when the
+# title doesn't say, its description) says it starts in that term, and dropped if it names a
+# different one.
+TERM_START_MONTH = {"winter": 1, "summer": 5, "fall": 9}
+SEASONS = {
+    "winter": ["winter"], "hiver": ["winter"], "summer": ["summer"], "été": ["summer"],
+    "fall": ["fall"], "autumn": ["fall"], "automne": ["fall"],
+    # "Spring" is May-Aug at Canadian schools but Jan-May at most US ones, so it counts as both.
+    "spring": ["winter", "summer"], "printemps": ["winter", "summer"],
+}
+MONTHS = {
+    "january": 1, "jan": 1, "janvier": 1, "february": 2, "feb": 2, "février": 2, "march": 3, "mar": 3,
+    "mars": 3, "april": 4, "apr": 4, "avril": 4, "may": 5, "mai": 5, "june": 6, "jun": 6, "juin": 6,
+    "july": 7, "jul": 7, "juillet": 7, "august": 8, "aug": 8, "août": 8, "september": 9, "sept": 9,
+    "sep": 9, "septembre": 9, "october": 10, "oct": 10, "octobre": 10, "november": 11, "nov": 11,
+    "novembre": 11, "december": 12, "dec": 12, "décembre": 12,
+}
+AMBIGUOUS_MONTHS = {"may", "mai", "mar"}  # also ordinary words, so they need a day or year next to them
+
+_SEASON = "|".join(sorted(SEASONS, key=len, reverse=True))
+_SEASONS = rf"(?:{_SEASON})(?:\s*(?:/|,|&|\bor\b|\band\b|\bou\b|\bet\b)\s*(?:{_SEASON}))*"
+_MONTH = "|".join(sorted(MONTHS, key=len, reverse=True))
+_YEAR = r"20\d\d|['’]\d\d"
+_TERM_WORD = (r"(?:work[\s-]+)?(?:terms?|semesters?|sessions?|co-?ops?|internships?|interns?|students?|"
+              r"placements?|cohorts?|stagiaires?|stages?)(?!\w)")
+_DAY = r"(?:\s+(\d{1,2})(?:st|nd|rd|th|er)?)?,?"
+_START = r"(?:start\w*|begin\w*|commenc\w*|available|from|début\w*|à partir)"
+_TO = r"(?:-|–|—|to|through|thru|until|till|à|au|jusqu['’]au)"
+
+SEASON_RE = re.compile(  # "Winter 2027", "winter term", "Summer 16-week co-op", "Fall 2026 or Winter 2027"
+    rf"(?<!\w)({_SEASONS})(?!\w)(?:[\s,]*({_YEAR})(?!\d))?"
+    rf"(\s+(?:\d[\w-]*\s+|full-time\s+|paid\s+)?{_TERM_WORD})?(?:[\s,]*({_YEAR})(?!\d))?")
+YEAR_SEASON_RE = re.compile(rf"(?<![\w/])({_YEAR})\s+({_SEASONS})(?!\w)")  # "2027 Winter Co-op"
+FRENCH_SEASON_RE = re.compile(  # "stage d'été 2027", "session d'hiver"
+    rf"(?<!\w)(?:stage|session|trimestre)s?\s+(?:d['’]|de\s+l['’]|de\s+)({_SEASON})(?!\w)(?:[\s,]*({_YEAR})(?!\d))?")
+RANGE_RE = re.compile(  # "January to April 2027", "Jan-Apr 2027", "janvier à avril 2027"
+    rf"(?<!\w)({_MONTH})(?!\w)\.?{_DAY}(?:\s+({_YEAR}))?\s*{_TO}\s*({_MONTH})(?!\w)\.?{_DAY}(?:\s+({_YEAR}))?")
+START_RE = re.compile(  # "Start date: January 5, 2027", "starting in May 2027"
+    rf"(?<!\w){_START}(?!\w)[^.\n]{{0,25}}?(?<!\w)({_MONTH})(?!\w)\.?{_DAY}(?:\s+({_YEAR}))?")
+NUMERIC_START_RE = re.compile(rf"(?<!\w){_START}(?!\w)[^.\n\d]{{0,20}}(\d{{1,2}})[/.](\d{{1,2}})[/.](20\d\d)")
+ISO_START_RE = re.compile(rf"(?<!\w){_START}(?!\w)[^.\n\d]{{0,20}}(20\d\d)-(\d{{1,2}})-(\d{{1,2}})")
+TITLE_MONTH_RE = re.compile(rf"(?<!\w)({_MONTH})(?!\w)\.?\s+({_YEAR})")
+TITLE_TERM_WORD_RE = re.compile(rf"(?<!\w){_TERM_WORD}")
+# Dates right after these are about school, not the work term ("graduating in Fall 2027").
+NOT_THE_TERM_RE = re.compile(r"graduat|diplôm|return\w*\s+to\s+(?:school|stud|class|univ)|back to school|"
+                             r"retour aux études|complete your degree")
+
+
+def month_term(month: int) -> str:
+    return "winter" if month <= 4 else "summer" if month <= 8 else "fall"
+
+
+def resolve_year(month: int, year: str | None, today: date) -> int:
+    """An explicit year, or the next time `month` comes around."""
+    if year:
+        y = int(year.strip("'’"))
+        return y + 2000 if y < 100 else y
+    return today.year if month >= today.month else today.year + 1
+
+
+def find_terms(text: str, today: date, in_title: bool = False) -> set[tuple[str, int]]:
+    """Work terms a piece of text says a job starts in, e.g. {("winter", 2027)}."""
+    text = text.lower()
+    found: set[tuple[str, int]] = set()
+
+    def about_school(m: re.Match) -> bool:
+        return NOT_THE_TERM_RE.search(text[max(0, m.start() - 50):m.start()]) is not None
+
+    def add_seasons(words: str, year: str | None) -> None:
+        for word in re.findall(_SEASON, words):
+            for season in SEASONS[word]:
+                found.add((season, resolve_year(TERM_START_MONTH[season], year, today)))
+
+    def add_month(month: int, year: str | None) -> None:
+        found.add((month_term(month), resolve_year(month, year, today)))
+
+    # A bare season only counts with a year or a word like "term" or "co-op" next to it, so
+    # "a terrace open in the summer and fall" doesn't. Titles get more benefit of the doubt.
+    loose_title = in_title and TITLE_TERM_WORD_RE.search(text)
+    for m in SEASON_RE.finditer(text):
+        year = m[2] or m[4]
+        if about_school(m) or not (year or m[3] or (loose_title and m[1] != "été")):
+            continue
+        add_seasons(m[1], year)
+    for m in YEAR_SEASON_RE.finditer(text):
+        if not about_school(m):
+            add_seasons(m[2], m[1])
+    for m in FRENCH_SEASON_RE.finditer(text):
+        if not about_school(m):
+            add_seasons(m[1], m[2])
+
+    for m in RANGE_RE.finditer(text):
+        if about_school(m):
+            continue
+        start, end = MONTHS[m[1]], MONTHS[m[4]]
+        year = m[3]
+        if not year and m[6]:  # "September to April 2027" starts in 2026
+            end_year = resolve_year(end, m[6], today)
+            year = str(end_year if start <= end else end_year - 1)
+        add_month(start, year)
+    for m in START_RE.finditer(text):
+        if about_school(m) or (m[1] in AMBIGUOUS_MONTHS and not (m[2] or m[3])):
+            continue
+        add_month(MONTHS[m[1]], m[3])
+    for m in NUMERIC_START_RE.finditer(text):  # day/month order varies, so take the reading that's upcoming
+        a, b, year = int(m[1]), int(m[2]), int(m[3])
+        readings = sorted(d for d in (safe_date(year, a, b), safe_date(year, b, a))
+                          if d and d >= today - timedelta(days=31))
+        if readings:
+            add_month(readings[0].month, str(readings[0].year))
+    for m in ISO_START_RE.finditer(text):
+        if safe_date(int(m[1]), int(m[2]), int(m[3])):
+            add_month(int(m[2]), m[1])
+    if in_title:
+        for m in TITLE_MONTH_RE.finditer(text):
+            if not (m[1] in AMBIGUOUS_MONTHS and m[2].startswith("'")):
+                add_month(MONTHS[m[1]], m[2])
+    return found
+
+
+def safe_date(year: int, month: int, day: int) -> date | None:
+    try:
+        return date(year, month, day)
+    except ValueError:
+        return None
+
+
+def parse_terms(value) -> set[tuple[str, int]]:
+    """config `term`: "Winter 2027", or a list of them."""
+    if not value:
+        return set()
+    terms = set()
+    for v in [value] if isinstance(value, str) else value:
+        m = re.fullmatch(r"\s*(winter|spring|summer|fall|autumn)\s+(20\d\d)\s*", str(v).lower())
+        if not m:
+            sys.exit(f"term must look like 'Winter 2027', 'Summer 2027' or 'Fall 2027', not {v!r}")
+        terms.add(({"spring": "summer", "autumn": "fall"}.get(m[1], m[1]), int(m[2])))
+    return terms
+
+
+def term_label(term: tuple[str, int]) -> str:
+    return f"{term[0].capitalize()} {term[1]}"
+
+
+def fetch_description(session: requests.Session, job_id: str) -> str | None:
+    try:
+        html = fetch(session, JOB_URL.format(job_id))
+    except Exception as e:
+        log(f"  couldn't load the description of job {job_id}: {e}")
+        return None
+    el = BeautifulSoup(html, "html.parser").select_one(".show-more-less-html__markup, .description__text")
+    return el.get_text(" ", strip=True) if el else ""
+
+
+def filter_by_term(session: requests.Session, jobs: list[Job], wanted: set[tuple[str, int]],
+                   require: bool) -> tuple[list[Job], list[Job]]:
+    """Split jobs into (kept, dropped) by work term. Reads descriptions only when titles don't say."""
+    today = date.today()
+    kept, dropped, unstated = [], [], 0
+    for job in jobs:
+        terms = find_terms(job.title, today, in_title=True)
+        if not terms:
+            time.sleep(random.uniform(3, 6))
+            terms = find_terms(fetch_description(session, job.id) or "", today)
+        if terms & wanted:
+            job.term, job.term_ok = term_label(min(terms & wanted)), True
+            kept.append(job)
+        elif terms or require:
+            dropped.append(job)
+        else:
+            job.term = "Term not stated"
+            kept.append(job)
+            unstated += 1
+    label = " or ".join(term_label(t) for t in sorted(wanted))
+    log(f"  {len(kept) - unstated} for {label}, {unstated} don't say when, {len(dropped)} dropped")
+    return kept, dropped
 
 
 # ---------------------------------------------------------------------------- state
@@ -433,6 +616,8 @@ def describe_search(search: dict, settings: dict) -> str:
         parts.append("also " + ", ".join(search["also"]))
     if option(search, settings, "similar_titles", True):
         parts.append("similar titles")
+    if wanted := parse_terms(option(search, settings, "term", None)):
+        parts.append(" or ".join(term_label(t) for t in sorted(wanted)) + " only")
     return " · ".join(parts)
 
 
@@ -465,7 +650,7 @@ def render_text(r: Report) -> str:
         lines += [f"== {search['title']} ({len(group)}) ==", ""]
         for j in group:
             lines.append(j.title)
-            lines.append("  " + " · ".join(filter(None, [j.company, j.location, j.posted, j.salary])))
+            lines.append("  " + " · ".join(filter(None, [j.company, j.location, j.posted, j.term, j.salary])))
             lines += [f"  {j.url}", ""]
     if not r.jobs:
         lines.append("No new postings matched your searches.")
@@ -494,7 +679,8 @@ def pill_html(text: str, good: bool = False) -> str:
 
 def job_html(job: Job) -> str:
     where = " · ".join(filter(None, [job.location, job.posted]))
-    pills = (pill_html("Early applicant", good=True) if job.early_applicant else "") + \
+    pills = (pill_html(job.term, good=job.term_ok) if job.term else "") + \
+            (pill_html("Early applicant", good=True) if job.early_applicant else "") + \
             (pill_html(job.salary) if job.salary else "")
     return (
         f'<tr><td class="rule" style="padding:16px 0;border-top:1px solid {RULE}">'
@@ -665,7 +851,8 @@ def main() -> int:
     if args.test_notify:
         sample = Job(id="0", title="Software Engineer (sample alert)", company="Example Co", location="Remote",
                      posted="1 hour ago", posted_date=None, salary="$120K/yr - $150K/yr",
-                     url="https://www.linkedin.com/jobs/", search="Test alert", early_applicant=True)
+                     url="https://www.linkedin.com/jobs/", search="Test alert", early_applicant=True,
+                     term="Winter 2027", term_ok=True)
         return 0 if notify(Report([sample], [{"title": "Test alert"}], {}, [])) else 1
 
     config = load_config(args.config)
@@ -676,6 +863,7 @@ def main() -> int:
     session = requests.Session()
     session.headers.update(HEADERS)
     new: dict[str, Job] = {}
+    skipped: set[str] = set()  # wrong term; remembered so their descriptions aren't fetched again
     failures = []
     for i, search in enumerate(searches):
         if i:
@@ -687,7 +875,17 @@ def main() -> int:
             log(f"  search failed: {e}")
             failures.append(search["title"])
             continue
-        fresh = [j for j in jobs if j.id not in seen and j.id not in new]
+        fresh = [j for j in jobs if j.id not in seen and j.id not in new and j.id not in skipped]
+        wanted_terms = parse_terms(option(search, settings, "term", None))
+        if wanted_terms and fresh:
+            try:
+                fresh, dropped = filter_by_term(session, fresh, wanted_terms,
+                                                option(search, settings, "require_term", False))
+            except Exception as e:
+                log(f"  term check failed: {e}")
+                failures.append(search["title"])
+                continue
+            skipped.update(j.id for j in dropped)
         log(f"  {len(fresh)} new since last run")
         new.update((j.id, j) for j in fresh)
 
@@ -708,6 +906,7 @@ def main() -> int:
 
     today = date.today().isoformat()
     seen.update((j.id, today) for j in report.jobs)
+    seen.update((job_id, today) for job_id in skipped)
     save_seen(seen)
     return 1 if len(failures) == len(searches) else 0
 
