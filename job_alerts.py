@@ -23,7 +23,7 @@ import sys
 import time
 import tomllib
 import webbrowser
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from email.message import EmailMessage
 from html import escape
@@ -70,6 +70,8 @@ class Job:
     early_applicant: bool = False
     term: str = ""         # e.g. "Winter 2027" or "Term not stated", when filtering by term
     term_ok: bool = False  # the posting says it's in the wanted term
+    duplicate_ids: list[str] = field(default_factory=list)    # same job listed again (other cities, reposts)
+    other_locations: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -324,6 +326,20 @@ def parse_jobs(html: str, search_title: str) -> list[Job]:
             early_applicant=any("early applicant" in b for b in badges),
         ))
     return jobs
+
+
+def merge_duplicates(jobs: list[Job]) -> list[Job]:
+    """LinkedIn lists a job once per city, and again when it's reposted. Keep one of each."""
+    merged: dict[tuple[str, str], Job] = {}
+    for job in jobs:
+        title = re.sub(r"[\s–-]*\(?\b(?:en|fr)\)?\s*$", "", job.title.lower())  # "...-EN" English copies
+        first = merged.setdefault((title, job.company.lower()), job)
+        if first is not job:
+            first.duplicate_ids += [job.id, *job.duplicate_ids]
+            for location in (job.location, *job.other_locations):
+                if location not in (first.location, *first.other_locations):
+                    first.other_locations.append(location)
+    return list(merged.values())
 
 
 def run_search(session: requests.Session, search: dict, settings: dict) -> list[Job]:
@@ -650,13 +666,18 @@ def render_text(r: Report) -> str:
         lines += [f"== {search['title']} ({len(group)}) ==", ""]
         for j in group:
             lines.append(j.title)
-            lines.append("  " + " · ".join(filter(None, [j.company, j.location, j.posted, j.term, j.salary])))
+            lines.append("  " + " · ".join(filter(None, [j.company, where(j), j.posted, j.term, j.salary])))
             lines += [f"  {j.url}", ""]
     if not r.jobs:
         lines.append("No new postings matched your searches.")
     if r.failures:
         lines += ["", failure_note(r.failures)]
     return "\n".join(lines).rstrip() + "\n"
+
+
+def where(job: Job) -> str:
+    n = len(job.other_locations)
+    return job.location + (f" (+{n} more location{'s' if n > 1 else ''})" if n else "")
 
 
 def logo_html(job: Job) -> str:
@@ -678,7 +699,7 @@ def pill_html(text: str, good: bool = False) -> str:
 
 
 def job_html(job: Job) -> str:
-    where = " · ".join(filter(None, [job.location, job.posted]))
+    place = " · ".join(filter(None, [where(job), job.posted]))
     pills = (pill_html(job.term, good=job.term_ok) if job.term else "") + \
             (pill_html("Early applicant", good=True) if job.early_applicant else "") + \
             (pill_html(job.salary) if job.salary else "")
@@ -690,7 +711,7 @@ def job_html(job: Job) -> str:
         f'<a class="accent" href="{escape(job.url)}" style="color:{ACCENT};font-size:15px;font-weight:600;'
         f'line-height:21px">{escape(job.title)}</a>'
         f'<div class="ink" style="color:{INK};font-size:14px;line-height:20px;margin-top:2px">{escape(job.company)}</div>'
-        f'<div class="faint" style="color:{FAINT};font-size:13px;line-height:18px;margin-top:1px">{escape(where)}</div>'
+        f'<div class="faint" style="color:{FAINT};font-size:13px;line-height:18px;margin-top:1px">{escape(place)}</div>'
         f'{pills}</td></tr></table></td></tr>'
     )
 
@@ -875,7 +896,7 @@ def main() -> int:
             log(f"  search failed: {e}")
             failures.append(search["title"])
             continue
-        fresh = [j for j in jobs if j.id not in seen and j.id not in new and j.id not in skipped]
+        fresh = merge_duplicates([j for j in jobs if j.id not in seen and j.id not in new and j.id not in skipped])
         wanted_terms = parse_terms(option(search, settings, "term", None))
         if wanted_terms and fresh:
             try:
@@ -885,11 +906,11 @@ def main() -> int:
                 log(f"  term check failed: {e}")
                 failures.append(search["title"])
                 continue
-            skipped.update(j.id for j in dropped)
+            skipped.update(i for j in dropped for i in (j.id, *j.duplicate_ids))
         log(f"  {len(fresh)} new since last run")
         new.update((j.id, j) for j in fresh)
 
-    report = Report(list(new.values()), searches, settings, failures)
+    report = Report(merge_duplicates(list(new.values())), searches, settings, failures)
     if args.preview:
         write_preview(report)
         return 0
@@ -905,7 +926,7 @@ def main() -> int:
         log("Nothing new; no notification sent")
 
     today = date.today().isoformat()
-    seen.update((j.id, today) for j in report.jobs)
+    seen.update((i, today) for j in report.jobs for i in (j.id, *j.duplicate_ids))
     seen.update((job_id, today) for job_id in skipped)
     save_seen(seen)
     return 1 if len(failures) == len(searches) else 0
