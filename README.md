@@ -58,4 +58,4 @@ To run it every day at 8am:
 ```bash
 ./schedule.sh 8:00
 ```
-`./schedule.sh --remove` stops it, and the output of each run goes to `logs/job_alerts.log`.
+More than one time works too, like `./schedule.sh 8:00 20:00` for twice a day. `./schedule.sh --remove` stops it, and the output of each run goes to `logs/job_alerts.log`.

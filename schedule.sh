@@ -1,8 +1,9 @@
 #!/bin/bash
 # Run job_alerts.py every day via launchd (macOS).
-#   ./schedule.sh           daily at 08:00
-#   ./schedule.sh 7:30      daily at 07:30
-#   ./schedule.sh --remove  stop the daily run
+#   ./schedule.sh              daily at 08:00
+#   ./schedule.sh 7:30         daily at 07:30
+#   ./schedule.sh 8:00 20:00   daily at 08:00 and 20:00 (any number of times)
+#   ./schedule.sh --remove     stop the daily runs
 # If the Mac is asleep at that time, launchd runs it when it wakes.
 set -euo pipefail
 
@@ -11,25 +12,33 @@ LABEL="local.linkedin-job-alerts"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 DOMAIN="gui/$(id -u)"
 
-launchctl bootout "$DOMAIN/$LABEL" 2>/dev/null || true
-
 if [[ "${1:-}" == "--remove" ]]; then
+  launchctl bootout "$DOMAIN/$LABEL" 2>/dev/null || true
   rm -f "$PLIST"
   echo "Removed the daily LinkedIn job alert."
   exit 0
 fi
 
-TIME="${1:-8:00}"
-if [[ ! "$TIME" =~ ^([0-9]{1,2}):([0-9]{2})$ ]]; then
-  echo "usage: $0 [HH:MM | --remove]" >&2
-  exit 1
+if (( $# == 0 )); then
+  set -- 8:00
 fi
-HOUR=$((10#${BASH_REMATCH[1]}))
-MINUTE=$((10#${BASH_REMATCH[2]}))
-if (( HOUR > 23 || MINUTE > 59 )); then
-  echo "invalid time: $TIME" >&2
-  exit 1
-fi
+INTERVALS=""
+TIMES=""
+for TIME in "$@"; do
+  if [[ ! "$TIME" =~ ^([0-9]{1,2}):([0-9]{2})$ ]]; then
+    echo "usage: $0 [HH:MM ... | --remove]" >&2
+    exit 1
+  fi
+  HOUR=$((10#${BASH_REMATCH[1]}))
+  MINUTE=$((10#${BASH_REMATCH[2]}))
+  if (( HOUR > 23 || MINUTE > 59 )); then
+    echo "invalid time: $TIME" >&2
+    exit 1
+  fi
+  INTERVALS+="    <dict><key>Hour</key><integer>$HOUR</integer><key>Minute</key><integer>$MINUTE</integer></dict>
+"
+  TIMES+="${TIMES:+, }$(printf "%02d:%02d" "$HOUR" "$MINUTE")"
+done
 
 PYTHON=""
 for candidate in "$DIR/venv/bin/python" "$DIR/.venv/bin/python"; do
@@ -40,6 +49,7 @@ if [[ -z "$PYTHON" ]]; then
   exit 1
 fi
 
+launchctl bootout "$DOMAIN/$LABEL" 2>/dev/null || true
 mkdir -p "$DIR/logs" "$HOME/Library/LaunchAgents"
 cat > "$PLIST" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -54,10 +64,8 @@ cat > "$PLIST" <<EOF
   </array>
   <key>WorkingDirectory</key><string>$DIR</string>
   <key>StartCalendarInterval</key>
-  <dict>
-    <key>Hour</key><integer>$HOUR</integer>
-    <key>Minute</key><integer>$MINUTE</integer>
-  </dict>
+  <array>
+$INTERVALS  </array>
   <key>StandardOutPath</key><string>$DIR/logs/job_alerts.log</string>
   <key>StandardErrorPath</key><string>$DIR/logs/job_alerts.log</string>
 </dict>
@@ -65,6 +73,6 @@ cat > "$PLIST" <<EOF
 EOF
 
 launchctl bootstrap "$DOMAIN" "$PLIST"
-printf "Scheduled daily at %02d:%02d.\n" "$HOUR" "$MINUTE"
+echo "Scheduled daily at $TIMES."
 echo "Logs:        $DIR/logs/job_alerts.log"
 echo "Run it now:  launchctl kickstart $DOMAIN/$LABEL"
