@@ -656,12 +656,26 @@ def filter_by_term(session: requests.Session, jobs: list[Job], wanted: set[tuple
 
 # ---------------------------------------------------------------------------- state
 
-def load_seen() -> dict[str, str]:
-    if not SEEN_FILE.exists():
+def read_json(path: Path, what: str) -> dict:
+    """A saved state file, or {} if it's missing or damaged. A damaged file (cut off mid-write, or
+    edited by hand) shouldn't stop every future run."""
+    if not path.exists():
         return {}
-    seen = json.loads(SEEN_FILE.read_text(encoding="utf-8"))
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            return data
+        problem = "it isn't a JSON object"
+    except ValueError as e:
+        problem = str(e)
+    log(f"{path.name} couldn't be read ({problem}); starting over with a fresh {what}")
+    return {}
+
+
+def load_seen() -> dict[str, str]:
+    seen = read_json(SEEN_FILE, "list of sent jobs")
     cutoff = (date.today() - timedelta(days=SEEN_RETENTION_DAYS)).isoformat()
-    return {job_id: day for job_id, day in seen.items() if day >= cutoff}
+    return {job_id: day for job_id, day in seen.items() if isinstance(day, str) and day >= cutoff}
 
 
 def save_seen(seen: dict[str, str]) -> None:
@@ -671,7 +685,7 @@ def save_seen(seen: dict[str, str]) -> None:
 
 
 def load_state() -> dict:
-    return json.loads(STATE_FILE.read_text(encoding="utf-8")) if STATE_FILE.exists() else {}
+    return read_json(STATE_FILE, "check-in history")
 
 
 def save_state(state: dict) -> None:
