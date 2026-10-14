@@ -150,6 +150,21 @@ def load_config(path: Path) -> dict:
     return config
 
 
+def as_list(value) -> list:
+    """Settings that take a list also accept a single value: also = "AI Co-op" works like ["AI Co-op"]."""
+    if value is None:
+        return []
+    return [value] if isinstance(value, str) else list(value)
+
+
+def synonym_groups(settings: dict) -> list[list[str]]:
+    """`synonyms` is a list of groups; a flat list of words counts as one group."""
+    groups = as_list(settings.get("synonyms"))
+    if groups and all(isinstance(g, str) for g in groups):
+        groups = [groups]
+    return [as_list(g) for g in groups]
+
+
 def option(search: dict, settings: dict, key: str, default):
     """Per-search value, falling back to [settings], then the default."""
     return search.get(key, settings.get(key, default))
@@ -180,7 +195,7 @@ def build_params(search: dict, window: timedelta, keywords: str) -> dict:
         ("job_type", JOB_TYPE, "f_JT"),
         ("workplace", WORKPLACE, "f_WT"),
     ):
-        values = search.get(key) or []
+        values = as_list(search.get(key))
         unknown = [v for v in values if v not in codes]
         if unknown:
             sys.exit(f"Unknown {key} {unknown} in search {search['title']!r}; choose from {list(codes)}")
@@ -382,12 +397,7 @@ def merge_duplicates(jobs: list[Job]) -> list[Job]:
 
 def block_list(search: dict, settings: dict, *keys: str) -> list[str]:
     """Everything listed under these keys, in [settings] and in the search (both apply)."""
-    found = []
-    for source in (settings, search):
-        for key in keys:
-            value = source.get(key) or []
-            found += [value] if isinstance(value, str) else list(value)
-    return found
+    return [item for source in (settings, search) for key in keys for item in as_list(source.get(key))]
 
 
 def run_search(session: requests.Session, search: dict, settings: dict) -> tuple[list[Job], str | None]:
@@ -395,13 +405,14 @@ def run_search(session: requests.Session, search: dict, settings: dict) -> tuple
     Raises if not even the first page could be loaded."""
     window = parse_window(option(search, settings, "posted_within", "24h"))
     max_pages = int(option(search, settings, "max_pages", 10))
-    matcher = TitleMatcher(option(search, settings, "similar_titles", True), settings.get("synonyms", []))
-    titles = [search["title"], *search.get("also", [])]
+    matcher = TitleMatcher(option(search, settings, "similar_titles", True), synonym_groups(settings))
+    titles = [search["title"], *as_list(search.get("also"))]
     params = build_params(search, window, matcher.query(titles))
     # LinkedIn's keyword search also matches descriptions and fuzzes heavily, so by default
     # keep only jobs whose title covers every word of one of the wanted titles.
     must_match = option(search, settings, "title_must_match", True)
-    wanted = [matcher.concepts(t) for t in titles]
+    # (a title with no real words, like "the", would otherwise match every job)
+    wanted = [c for c in map(matcher.concepts, titles) if c]
     # "exclude" is the old name for block_titles and still works.
     unwanted = [matcher.concepts(w) for w in block_list(search, settings, "block_titles", "exclude")]
     # Company names match as whole words, ignoring case: "Amazon" also blocks "Amazon Web Services (AWS)".
@@ -719,11 +730,11 @@ def describe_search(search: dict, settings: dict) -> str:
     """e.g. 'Canada · Entry level · Remote · past 24 hours'"""
     parts = [search.get("location") or "Any location"]
     for key in ("experience", "job_type", "workplace"):
-        if search.get(key):
-            parts.append(", ".join(LABELS.get(v, v.capitalize()) for v in search[key]))
+        if values := as_list(search.get(key)):
+            parts.append(", ".join(LABELS.get(v, v.capitalize()) for v in values))
     parts.append(describe_window(parse_window(option(search, settings, "posted_within", "24h"))))
-    if search.get("also"):
-        parts.append("also " + ", ".join(search["also"]))
+    if also := as_list(search.get("also")):
+        parts.append("also " + ", ".join(also))
     if option(search, settings, "similar_titles", True):
         parts.append("similar titles")
     if wanted := parse_terms(option(search, settings, "term", None)):
