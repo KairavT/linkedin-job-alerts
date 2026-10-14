@@ -49,6 +49,11 @@ if [[ -z "$PYTHON" ]]; then
   exit 1
 fi
 
+# Paths go into an XML file, so characters like & in a folder name need escaping.
+xml() { printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'; }
+XPYTHON="$(xml "$PYTHON")"
+XDIR="$(xml "$DIR")"
+
 launchctl bootout "$DOMAIN/$LABEL" 2>/dev/null || true
 mkdir -p "$DIR/logs" "$HOME/Library/LaunchAgents"
 cat > "$PLIST" <<EOF
@@ -59,15 +64,15 @@ cat > "$PLIST" <<EOF
   <key>Label</key><string>$LABEL</string>
   <key>ProgramArguments</key>
   <array>
-    <string>$PYTHON</string>
-    <string>$DIR/job_alerts.py</string>
+    <string>$XPYTHON</string>
+    <string>$XDIR/job_alerts.py</string>
   </array>
-  <key>WorkingDirectory</key><string>$DIR</string>
+  <key>WorkingDirectory</key><string>$XDIR</string>
   <key>StartCalendarInterval</key>
   <array>
 $INTERVALS  </array>
-  <key>StandardOutPath</key><string>$DIR/logs/job_alerts.log</string>
-  <key>StandardErrorPath</key><string>$DIR/logs/job_alerts.log</string>
+  <key>StandardOutPath</key><string>$XDIR/logs/job_alerts.log</string>
+  <key>StandardErrorPath</key><string>$XDIR/logs/job_alerts.log</string>
 </dict>
 </plist>
 EOF

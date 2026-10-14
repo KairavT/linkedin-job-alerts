@@ -150,6 +150,21 @@ def load_config(path: Path) -> dict:
     return config
 
 
+def as_list(value) -> list:
+    """Settings that take a list also accept a single value: also = "AI Co-op" works like ["AI Co-op"]."""
+    if value is None:
+        return []
+    return [value] if isinstance(value, str) else list(value)
+
+
+def synonym_groups(settings: dict) -> list[list[str]]:
+    """`synonyms` is a list of groups; a flat list of words counts as one group."""
+    groups = as_list(settings.get("synonyms"))
+    if groups and all(isinstance(g, str) for g in groups):
+        groups = [groups]
+    return [as_list(g) for g in groups]
+
+
 def option(search: dict, settings: dict, key: str, default):
     """Per-search value, falling back to [settings], then the default."""
     return search.get(key, settings.get(key, default))
@@ -180,7 +195,7 @@ def build_params(search: dict, window: timedelta, keywords: str) -> dict:
         ("job_type", JOB_TYPE, "f_JT"),
         ("workplace", WORKPLACE, "f_WT"),
     ):
-        values = search.get(key) or []
+        values = as_list(search.get(key))
         unknown = [v for v in values if v not in codes]
         if unknown:
             sys.exit(f"Unknown {key} {unknown} in search {search['title']!r}; choose from {list(codes)}")
@@ -382,12 +397,7 @@ def merge_duplicates(jobs: list[Job]) -> list[Job]:
 
 def block_list(search: dict, settings: dict, *keys: str) -> list[str]:
     """Everything listed under these keys, in [settings] and in the search (both apply)."""
-    found = []
-    for source in (settings, search):
-        for key in keys:
-            value = source.get(key) or []
-            found += [value] if isinstance(value, str) else list(value)
-    return found
+    return [item for source in (settings, search) for key in keys for item in as_list(source.get(key))]
 
 
 def run_search(session: requests.Session, search: dict, settings: dict) -> tuple[list[Job], str | None]:
@@ -395,13 +405,14 @@ def run_search(session: requests.Session, search: dict, settings: dict) -> tuple
     Raises if not even the first page could be loaded."""
     window = parse_window(option(search, settings, "posted_within", "24h"))
     max_pages = int(option(search, settings, "max_pages", 10))
-    matcher = TitleMatcher(option(search, settings, "similar_titles", True), settings.get("synonyms", []))
-    titles = [search["title"], *search.get("also", [])]
+    matcher = TitleMatcher(option(search, settings, "similar_titles", True), synonym_groups(settings))
+    titles = [search["title"], *as_list(search.get("also"))]
     params = build_params(search, window, matcher.query(titles))
     # LinkedIn's keyword search also matches descriptions and fuzzes heavily, so by default
     # keep only jobs whose title covers every word of one of the wanted titles.
     must_match = option(search, settings, "title_must_match", True)
-    wanted = [matcher.concepts(t) for t in titles]
+    # (a title with no real words, like "the", would otherwise match every job)
+    wanted = [c for c in map(matcher.concepts, titles) if c]
     # "exclude" is the old name for block_titles and still works.
     unwanted = [matcher.concepts(w) for w in block_list(search, settings, "block_titles", "exclude")]
     # Company names match as whole words, ignoring case: "Amazon" also blocks "Amazon Web Services (AWS)".
@@ -477,7 +488,7 @@ _MONTH = "|".join(sorted(MONTHS, key=len, reverse=True))
 _YEAR = r"20\d\d|['’]\d\d"
 _TERM_WORD = (r"(?:work[\s-]+)?(?:terms?|semesters?|sessions?|co-?ops?|internships?|interns?|students?|"
               r"placements?|cohorts?|stagiaires?|stages?)(?!\w)")
-_DAY = r"(?:\s+(\d{1,2})(?:st|nd|rd|th|er)?)?,?"
+_DAY = r"(?:\s+(\d{1,2})(?!\d)(?:st|nd|rd|th|er)?)?,?"  # (?!\d): don't read the "20" of "2027" as a day
 _START = r"(?:start\w*|begin\w*|commenc\w*|available|from|début\w*|à partir)"
 _TO = r"(?:-|–|—|to|through|thru|until|till|à|au|jusqu['’]au)"
 
@@ -645,12 +656,26 @@ def filter_by_term(session: requests.Session, jobs: list[Job], wanted: set[tuple
 
 # ---------------------------------------------------------------------------- state
 
-def load_seen() -> dict[str, str]:
-    if not SEEN_FILE.exists():
+def read_json(path: Path, what: str) -> dict:
+    """A saved state file, or {} if it's missing or damaged. A damaged file (cut off mid-write, or
+    edited by hand) shouldn't stop every future run."""
+    if not path.exists():
         return {}
-    seen = json.loads(SEEN_FILE.read_text(encoding="utf-8"))
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            return data
+        problem = "it isn't a JSON object"
+    except ValueError as e:
+        problem = str(e)
+    log(f"{path.name} couldn't be read ({problem}); starting over with a fresh {what}")
+    return {}
+
+
+def load_seen() -> dict[str, str]:
+    seen = read_json(SEEN_FILE, "list of sent jobs")
     cutoff = (date.today() - timedelta(days=SEEN_RETENTION_DAYS)).isoformat()
-    return {job_id: day for job_id, day in seen.items() if day >= cutoff}
+    return {job_id: day for job_id, day in seen.items() if isinstance(day, str) and day >= cutoff}
 
 
 def save_seen(seen: dict[str, str]) -> None:
@@ -660,7 +685,7 @@ def save_seen(seen: dict[str, str]) -> None:
 
 
 def load_state() -> dict:
-    return json.loads(STATE_FILE.read_text(encoding="utf-8")) if STATE_FILE.exists() else {}
+    return read_json(STATE_FILE, "check-in history")
 
 
 def save_state(state: dict) -> None:
@@ -719,11 +744,11 @@ def describe_search(search: dict, settings: dict) -> str:
     """e.g. 'Canada · Entry level · Remote · past 24 hours'"""
     parts = [search.get("location") or "Any location"]
     for key in ("experience", "job_type", "workplace"):
-        if search.get(key):
-            parts.append(", ".join(LABELS.get(v, v.capitalize()) for v in search[key]))
+        if values := as_list(search.get(key)):
+            parts.append(", ".join(LABELS.get(v, v.capitalize()) for v in values))
     parts.append(describe_window(parse_window(option(search, settings, "posted_within", "24h"))))
-    if search.get("also"):
-        parts.append("also " + ", ".join(search["also"]))
+    if also := as_list(search.get("also")):
+        parts.append("also " + ", ".join(also))
     if option(search, settings, "similar_titles", True):
         parts.append("similar titles")
     if wanted := parse_terms(option(search, settings, "term", None)):
