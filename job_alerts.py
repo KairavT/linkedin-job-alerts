@@ -477,7 +477,7 @@ _MONTH = "|".join(sorted(MONTHS, key=len, reverse=True))
 _YEAR = r"20\d\d|['’]\d\d"
 _TERM_WORD = (r"(?:work[\s-]+)?(?:terms?|semesters?|sessions?|co-?ops?|internships?|interns?|students?|"
               r"placements?|cohorts?|stagiaires?|stages?)(?!\w)")
-_DAY = r"(?:\s+(\d{1,2})(?:st|nd|rd|th|er)?)?,?"
+_DAY = r"(?:\s+(\d{1,2})(?!\d)(?:st|nd|rd|th|er)?)?,?"  # (?!\d): don't read the "20" of "2027" as a day
 _START = r"(?:start\w*|begin\w*|commenc\w*|available|from|début\w*|à partir)"
 _TO = r"(?:-|–|—|to|through|thru|until|till|à|au|jusqu['’]au)"
 
