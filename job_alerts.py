@@ -381,6 +381,16 @@ def merge_duplicates(jobs: list[Job]) -> list[Job]:
     return list(merged.values())
 
 
+def block_list(search: dict, settings: dict, *keys: str) -> list[str]:
+    """Everything listed under these keys, in [settings] and in the search (both apply)."""
+    found = []
+    for source in (settings, search):
+        for key in keys:
+            value = source.get(key) or []
+            found += [value] if isinstance(value, str) else list(value)
+    return found
+
+
 def run_search(session: requests.Session, search: dict, settings: dict) -> tuple[list[Job], str | None]:
     """Jobs matching the search, and why it stopped early (None if it didn't).
     Raises if not even the first page could be loaded."""
@@ -393,13 +403,14 @@ def run_search(session: requests.Session, search: dict, settings: dict) -> tuple
     # keep only jobs whose title covers every word of one of the wanted titles.
     must_match = option(search, settings, "title_must_match", True)
     wanted = [matcher.concepts(t) for t in titles]
-    unwanted = [matcher.concepts(w) for w in [*settings.get("exclude", []), *search.get("exclude", [])]]
+    # "exclude" is the old name for block_titles and still works.
+    unwanted = [matcher.concepts(w) for w in block_list(search, settings, "block_titles", "exclude")]
     # LinkedIn's time filter is reliable but promoted posts sometimes slip through;
     # its dates are UTC calendar days, so allow a day of slack.
     oldest = (datetime.now(timezone.utc) - window).date() - timedelta(days=1)
 
     found: dict[str, Job] = {}
-    scanned = 0
+    scanned = blocked = 0
     stopped = None
     for page in range(max_pages):
         if page:
@@ -426,9 +437,11 @@ def run_search(session: requests.Session, search: dict, settings: dict) -> tuple
             if must_match and not any(w <= words for w in wanted):
                 continue
             if any(u and u <= words for u in unwanted):
+                blocked += 1
                 continue
             found.setdefault(job.id, job)
-    log(f"  scanned {scanned} listings, {len(found)} match the title filters")
+    log(f"  scanned {scanned} listings, {len(found)} match the title filters"
+        + (f" ({blocked} more were blocked)" if blocked else ""))
     if stopped:
         log(f"  {stopped}; keeping what was found")
     return list(found.values()), stopped

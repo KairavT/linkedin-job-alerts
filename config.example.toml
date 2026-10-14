@@ -19,7 +19,8 @@ checkin_days = 3          # after this many days with no email, send a short "st
 # term = "Winter 2027"    # only co-ops/internships starting in this term, read from the title or description:
                           # Winter (Jan-Apr), Summer or Spring (May-Aug), Fall (Sep-Dec); can be a list
 # require_term = false    # true = also drop postings that don't say when they are (kept and labelled by default)
-exclude = []              # skip titles containing any of these words, in every search
+block_titles = []         # skip jobs whose title has any of these words, e.g. ["senior", "manager"]
+                          # (similar words count too, so "senior" also blocks "Sr.")
 # Extra groups of interchangeable title words, on top of the built-in ones in job_alerts.py
 # (intern/co-op/internship/student, engineer/developer, junior/entry level/new grad, swe, ml, ...):
 # synonyms = [["designer", "ux"], ["devops", "platform", "infrastructure"]]
@@ -31,11 +32,11 @@ location = "Canada"
 # experience = ["internship", "entry"]       # internship, entry, associate, mid-senior, director, executive
 # job_type   = ["full-time", "internship"]   # full-time, part-time, contract, temporary, internship
 # workplace  = ["remote", "hybrid"]          # on-site, remote, hybrid
-# exclude    = ["senior", "staff"]           # skip titles containing these words (or synonyms: "senior" covers "Sr.")
+# block_titles = ["senior", "staff"]         # skip jobs whose title has these words, in this search only
 # also       = ["Data Engineer Co-op"]       # other titles to fold into this search
 
 [[search]]
 title = "Software Engineer"
 location = "United States"
 experience = ["entry"]
-exclude = ["senior", "staff", "principal", "lead", "manager", "intern"]  # "intern" also drops co-ops
+block_titles = ["senior", "staff", "principal", "lead", "manager", "intern"]  # "intern" also blocks co-ops
