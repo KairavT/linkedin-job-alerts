@@ -125,7 +125,7 @@ def load_env(path: Path) -> None:
     """Minimal .env loader: KEY=VALUE lines; real environment variables win."""
     if not path.exists():
         return
-    for line in path.read_text().splitlines():
+    for line in path.read_text(encoding="utf-8-sig").splitlines():  # -sig: skip a Windows byte order mark
         line = line.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
@@ -141,8 +141,7 @@ def load_env(path: Path) -> None:
 def load_config(path: Path) -> dict:
     if not path.exists():
         sys.exit(f"{path} not found. Copy config.example.toml to config.toml and add your searches.")
-    with path.open("rb") as f:
-        config = tomllib.load(f)
+    config = tomllib.loads(path.read_text(encoding="utf-8-sig"))  # -sig: skip a Windows byte order mark
     if not config.get("search"):
         sys.exit(f"{path}: add at least one [[search]] block")
     for search in config["search"]:
@@ -649,24 +648,24 @@ def filter_by_term(session: requests.Session, jobs: list[Job], wanted: set[tuple
 def load_seen() -> dict[str, str]:
     if not SEEN_FILE.exists():
         return {}
-    seen = json.loads(SEEN_FILE.read_text())
+    seen = json.loads(SEEN_FILE.read_text(encoding="utf-8"))
     cutoff = (date.today() - timedelta(days=SEEN_RETENTION_DAYS)).isoformat()
     return {job_id: day for job_id, day in seen.items() if day >= cutoff}
 
 
 def save_seen(seen: dict[str, str]) -> None:
     tmp = SEEN_FILE.with_suffix(".tmp")
-    tmp.write_text(json.dumps(seen, indent=0, sort_keys=True))
+    tmp.write_text(json.dumps(seen, indent=0, sort_keys=True), encoding="utf-8")
     tmp.replace(SEEN_FILE)
 
 
 def load_state() -> dict:
-    return json.loads(STATE_FILE.read_text()) if STATE_FILE.exists() else {}
+    return json.loads(STATE_FILE.read_text(encoding="utf-8")) if STATE_FILE.exists() else {}
 
 
 def save_state(state: dict) -> None:
     tmp = STATE_FILE.with_suffix(".tmp")
-    tmp.write_text(json.dumps(state, indent=2))
+    tmp.write_text(json.dumps(state, indent=2), encoding="utf-8")
     tmp.replace(STATE_FILE)
 
 
@@ -928,7 +927,7 @@ def render_html(r: Report) -> str:
         f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">{"".join(body)}</table>'
         f'</td></tr>'
         f'<tr><td class="faint" style="padding:20px 24px 0;text-align:center;color:{FAINT};font-size:12px;line-height:18px">'
-        f'Sent by your LinkedIn job alerts script at {datetime.now():%-I:%M %p}.<br>'
+        f'Sent by your LinkedIn job alerts script at {datetime.now().strftime("%I:%M %p").lstrip("0")}.<br>'
         f'Change what you get in config.toml.</td></tr>'
         f'</table></td></tr></table></body></html>'
     )
@@ -1004,7 +1003,7 @@ def notify(r: Report) -> bool:
 
 def write_preview(r: Report) -> None:
     path = ROOT / "preview.html"
-    path.write_text(render_html(r))
+    path.write_text(render_html(r), encoding="utf-8")
     log(f"Wrote {path}")
     webbrowser.open(path.as_uri())
 
@@ -1019,9 +1018,22 @@ def main() -> int:
                         help="like --dry-run, but open the email in your browser instead of printing it")
     parser.add_argument("--test-notify", action="store_true", help="send a sample alert without searching")
     # Short by default: the point is spotting jobs early, and older postings are less worth applying to.
+    parser.add_argument("--log", metavar="FILE",
+                        help="append output to this file (relative paths are from the project folder), for "
+                             "schedulers that don't save output themselves, like Windows Task Scheduler")
     parser.add_argument("--lookback", metavar="WINDOW", nargs="?", const="48h",
                         help="one-off catch-up: search this far back instead of posted_within (48h if no window is given)")
     args = parser.parse_args()
+
+    # Job titles and company names can be in any language. Windows consoles and log files default to
+    # a narrower encoding than UTF-8, so printing one could crash the run.
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
+    if args.log:
+        log_file = ROOT / args.log
+        log_file.parent.mkdir(parents=True, exist_ok=True)
+        sys.stdout = sys.stderr = log_file.open("a", encoding="utf-8", errors="replace", buffering=1)
 
     load_env(ROOT / ".env")
 
