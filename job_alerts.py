@@ -106,6 +106,7 @@ class Report:
     failures: list[str]  # searches that got nothing
     partial: list[str] = field(default_factory=list)  # searches that stopped part-way
     checkin_days: float | None = None  # set when this is a "still checking" email after a quiet stretch
+    failed_runs: tuple[int, int] = (0, 0)  # for check-ins: (runs that didn't finish, runs) since the last email
     unreadable_searches: list[str] = field(default_factory=list)  # results pages we couldn't read
     unreadable_descriptions: bool = False  # job pages loaded but none had a readable description
 
@@ -719,8 +720,13 @@ def days(n: float) -> str:
 
 
 def checkin_note(r: Report) -> str:
-    return (f"Nothing new has matched your searches in the last {days(r.checkin_days)}. This is a check-in so "
+    note = (f"Nothing new has matched your searches in the last {days(r.checkin_days)}. This is a check-in so "
             "you know the alerts are still running; if even these stop arriving, look at logs/job_alerts.log.")
+    failed, runs = r.failed_runs
+    if failed:
+        note += (f" {failed} of the {plural(runs, 'run')} in that time couldn't finish all their searches, usually "
+                 "because LinkedIn was rate-limiting, so some postings may have been missed.")
+    return note
 
 
 def layout_note(r: Report) -> str:
@@ -736,17 +742,17 @@ def layout_note(r: Report) -> str:
 
 def nothing_ran_ok(r: Report) -> bool:
     """No jobs, and that's because searches failed or couldn't be read, not because nothing matched."""
-    return not r.jobs and bool(r.failures or r.unreadable_searches)
+    return not r.jobs and not r.checkin_days and bool(r.failures or r.unreadable_searches)
 
 
 def subject(r: Report) -> str:
     if not r.jobs:
         if r.unreadable_searches or r.unreadable_descriptions:
             return "LinkedIn job alerts: couldn't read LinkedIn's pages"
-        if r.failures:
-            return "LinkedIn job alerts: search failed"
         if r.checkin_days:
             return f"Still checking: no new LinkedIn jobs in {days(r.checkin_days)}"
+        if r.failures:
+            return "LinkedIn job alerts: search failed"
         return "No new LinkedIn jobs today"
     counts = ", ".join(f"{s['title']} ({len(g)})" for s, g in r.groups() if g)
     return f"{plural(len(r.jobs), 'new LinkedIn job')}: {counts}"
@@ -851,10 +857,12 @@ def render_html(r: Report) -> str:
         headline = plural(n, "new job")
     elif r.unreadable_searches:
         headline = "Couldn't read LinkedIn"
+    elif r.checkin_days:
+        headline = "Still checking"
     elif r.failures:
         headline = "Searches didn't finish"
     else:
-        headline = "Still checking" if r.checkin_days else "Nothing new today"
+        headline = "Nothing new today"
     sub = f"{datetime.now():%A, %B} {datetime.now().day} · {plural(len(r.searches), 'search', 'searches')}"
     body = [
         f'<tr><td class="pad rule" style="padding:32px 32px 22px;border-bottom:1px solid {RULE}">'
@@ -1081,16 +1089,24 @@ def main() -> int:
     now = datetime.now()
     last_alert = datetime.fromisoformat(state["last_alert"]) if "last_alert" in state else now
     checkin_days = float(settings.get("checkin_days", 3))
-    sending = bool(report.jobs or failures or unreadable or unreadable_descriptions
-                   or settings.get("send_when_empty", False))
+    run_failed = bool(failures or partial)
+    state["runs_since_alert"] = state.get("runs_since_alert", 0) + 1
+    state["failed_runs_since_alert"] = state.get("failed_runs_since_alert", 0) + run_failed
+    # Searches that didn't finish don't cause an email on their own: the next run's time frame overlaps
+    # this one, so it picks up whatever was missed. They're mentioned when an email goes out anyway,
+    # and the check-in email says if runs keep failing.
+    sending = bool(report.jobs or unreadable or unreadable_descriptions or settings.get("send_when_empty", False))
     if not sending and checkin_days and now - last_alert >= timedelta(days=checkin_days):
         report.checkin_days = checkin_days
+        report.failed_runs = (state["failed_runs_since_alert"], state["runs_since_alert"])
         sending = True
     if sending:
         if not notify(report):
             log("No notification went through; not marking jobs as seen so they're retried next run")
             return 1
-        state["last_alert"] = now.isoformat(timespec="seconds")
+        state.update(last_alert=now.isoformat(timespec="seconds"), runs_since_alert=0, failed_runs_since_alert=0)
+    elif run_failed:
+        log("Nothing new; some searches didn't finish, so the next run will pick them up (no email for that alone)")
     else:
         log("Nothing new; no notification sent")
     state.setdefault("last_alert", now.isoformat(timespec="seconds"))  # first run: start counting from now
