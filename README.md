@@ -62,4 +62,4 @@ To run it every day at 8am:
 ```
 More than one time works too, like `./schedule.sh 8:00 20:00` for twice a day. `./schedule.sh --remove` stops it, and the output of each run goes to `logs/job_alerts.log`.
 
-The Mac has to be on and awake at the scheduled times for the email to arrive on time. If it is asleep (for example with the lid closed), the run happens as soon as the Mac is opened again, and if several runs were missed while it slept they are combined into one. If the Mac is shut down at a scheduled time, that run is skipped.
+The Mac has to be on and awake at the scheduled times for the email to arrive on time. If it is asleep (for example with the lid closed), macOS may still start the run during one of the short background wakes it does while sleeping, but those only last a few seconds, so the run finishes once the Mac is opened again and the email arrives then. If several runs were missed while it slept they are combined into one. If the Mac is shut down at a scheduled time, that run is skipped.
