@@ -9,7 +9,7 @@ sent before, and delivers them by email and/or ntfy push notification.
     python job_alerts.py --dry-run      # search and print only; nothing sent or saved
     python job_alerts.py --preview      # search and open the email in your browser instead
     python job_alerts.py --test-notify  # send a sample alert to check email/ntfy setup
-    python job_alerts.py --lookback 1w  # one-off catch-up: search the past week instead of posted_within
+    python job_alerts.py --lookback     # one-off catch-up over the past 48 hours (or --lookback 3d, etc.)
 """
 
 from __future__ import annotations
@@ -991,8 +991,9 @@ def main() -> int:
     parser.add_argument("--preview", action="store_true",
                         help="like --dry-run, but open the email in your browser instead of printing it")
     parser.add_argument("--test-notify", action="store_true", help="send a sample alert without searching")
-    parser.add_argument("--lookback", metavar="WINDOW",
-                        help="one-off catch-up: search this far back instead of posted_within, like 1w or 3d")
+    # Short by default: the point is spotting jobs early, and older postings are less worth applying to.
+    parser.add_argument("--lookback", metavar="WINDOW", nargs="?", const="48h",
+                        help="one-off catch-up: search this far back instead of posted_within (48h if no window is given)")
     args = parser.parse_args()
 
     load_env(ROOT / ".env")
