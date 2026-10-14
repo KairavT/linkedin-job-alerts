@@ -405,6 +405,10 @@ def run_search(session: requests.Session, search: dict, settings: dict) -> tuple
     wanted = [matcher.concepts(t) for t in titles]
     # "exclude" is the old name for block_titles and still works.
     unwanted = [matcher.concepts(w) for w in block_list(search, settings, "block_titles", "exclude")]
+    # Company names match as whole words, ignoring case: "Amazon" also blocks "Amazon Web Services (AWS)".
+    companies = [c for c in block_list(search, settings, "block_companies") if c.strip()]
+    blocked_company = re.compile("|".join(rf"(?<!\w){re.escape(c.strip().lower())}(?!\w)" for c in companies)) \
+        if companies else None
     # LinkedIn's time filter is reliable but promoted posts sometimes slip through;
     # its dates are UTC calendar days, so allow a day of slack.
     oldest = (datetime.now(timezone.utc) - window).date() - timedelta(days=1)
@@ -436,7 +440,7 @@ def run_search(session: requests.Session, search: dict, settings: dict) -> tuple
             words = matcher.words(job.title)
             if must_match and not any(w <= words for w in wanted):
                 continue
-            if any(u and u <= words for u in unwanted):
+            if any(u and u <= words for u in unwanted) or (blocked_company and blocked_company.search(job.company.lower())):
                 blocked += 1
                 continue
             found.setdefault(job.id, job)
