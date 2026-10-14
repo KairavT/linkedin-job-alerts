@@ -56,8 +56,10 @@ WORKPLACE = {"on-site": "1", "remote": "2", "hybrid": "3"}
 
 NTFY_MAX_LINES = 15
 
-# When the run has to wrap up (time.time()), from max_run_minutes. LinkedIn's rate limiting can
-# otherwise stretch a run out for hours, since every blocked request backs off for minutes.
+# When the run has to wrap up, from max_run_minutes. LinkedIn's rate limiting can otherwise stretch
+# a run out for hours, since every blocked request backs off for minutes. Measured with
+# time.monotonic(), which stops while the computer sleeps: macOS can start a run during one of its
+# short background wakes with the lid closed, and that sleep shouldn't use up the run's time.
 RUN_DEADLINE: float | None = None
 
 
@@ -66,7 +68,7 @@ class OutOfTime(Exception):
 
 
 def out_of_time() -> bool:
-    return RUN_DEADLINE is not None and time.time() > RUN_DEADLINE
+    return RUN_DEADLINE is not None and time.monotonic() > RUN_DEADLINE
 
 
 class UnreadablePage(Exception):
@@ -313,7 +315,7 @@ def fetch(session: requests.Session, url: str, params: dict | None = None) -> st
         except requests.Timeout:
             problem = "timeout"
         wait = 15 * 2**attempt + random.uniform(0, 5)
-        if RUN_DEADLINE is not None and time.time() + wait > RUN_DEADLINE:
+        if RUN_DEADLINE is not None and time.monotonic() + wait > RUN_DEADLINE:
             raise OutOfTime(f"ran out of time after {problem}")
         log(f"  LinkedIn: {problem}; retrying in {wait:.0f}s")
         time.sleep(wait)
@@ -1017,7 +1019,7 @@ def main() -> int:
     # Catch-up runs aren't time-limited: whatever they didn't get to would fall outside the next
     # normal run's window and never be checked.
     global RUN_DEADLINE
-    RUN_DEADLINE = None if args.lookback else time.time() + float(settings.get("max_run_minutes", 30)) * 60
+    RUN_DEADLINE = None if args.lookback else time.monotonic() + float(settings.get("max_run_minutes", 30)) * 60
 
     session = requests.Session()
     session.headers.update(HEADERS)
