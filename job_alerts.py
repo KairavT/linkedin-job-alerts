@@ -125,7 +125,7 @@ def load_env(path: Path) -> None:
     """Minimal .env loader: KEY=VALUE lines; real environment variables win."""
     if not path.exists():
         return
-    for line in path.read_text(encoding="utf-8").splitlines():
+    for line in path.read_text(encoding="utf-8-sig").splitlines():  # -sig: skip a Windows byte order mark
         line = line.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
@@ -141,8 +141,7 @@ def load_env(path: Path) -> None:
 def load_config(path: Path) -> dict:
     if not path.exists():
         sys.exit(f"{path} not found. Copy config.example.toml to config.toml and add your searches.")
-    with path.open("rb") as f:
-        config = tomllib.load(f)
+    config = tomllib.loads(path.read_text(encoding="utf-8-sig"))  # -sig: skip a Windows byte order mark
     if not config.get("search"):
         sys.exit(f"{path}: add at least one [[search]] block")
     for search in config["search"]:
