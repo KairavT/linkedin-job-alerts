@@ -78,6 +78,13 @@ class UnreadablePage(Exception):
 # Job description pages loaded this run, and how many had no description we could find.
 DESCRIPTION_PAGES = {"read": 0, "unreadable": 0}
 
+# LinkedIn job IDs go up over time, roughly half a million a day. A reposted job keeps its original ID
+# while LinkedIn lists it as just posted, so a "new" job whose ID is far below the newest ones is really
+# an older posting, usually with a pile of applicants already. LinkedIn's public pages don't say so directly.
+JOB_IDS_PER_DAY = 500_000
+REPOST_MARGIN_DAYS = 2  # a genuinely new posting's ID can be a little older (drafted before it went up)
+NEWEST_JOB_ID = {"id": 0}  # highest job ID seen this run (or saved from earlier runs)
+
 
 @dataclass
 class Job:
@@ -92,6 +99,7 @@ class Job:
     search: str  # title of the [[search]] that found it
     logo: str = ""
     early_applicant: bool = False
+    likely_repost: bool = False
     term: str = ""         # e.g. "Winter 2027" or "Term not stated", when filtering by term
     term_ok: bool = False  # the posting says it's in the wanted term
     duplicate_ids: list[str] = field(default_factory=list)    # same job listed again (other cities, reposts)
@@ -234,7 +242,9 @@ EXPANSIONS = {"swe": "software engineer", "sde": "software engineer", "sdet": "s
 IMPLIED = {"software": {"developer", "programmer", "frontend", "backend", "fullstack", "web", "mobile",
                         "ios", "android", "développeur", "développeuse", "logiciel"}}
 STOPWORDS = {"a", "an", "and", "at", "for", "in", "of", "on", "or", "the", "to", "with"}
-TOKEN_RE = re.compile(r"\.?[^\W_][\w+#]*(?:\.\w+)*")
+# Letters joined by "." or "&" stay one word: "node.js", and "AI&T" (assembly, integration and test)
+# or "R&D" aren't read as "AI" or "R".
+TOKEN_RE = re.compile(r"\.?[^\W_][\w+#]*(?:[.&]\w+)*")
 
 
 def singular(word: str) -> str:
@@ -400,6 +410,15 @@ def block_list(search: dict, settings: dict, *keys: str) -> list[str]:
     return [item for source in (settings, search) for key in keys for item in as_list(source.get(key))]
 
 
+def mark_reposts(jobs: list[Job], window: timedelta) -> None:
+    """Flag jobs whose ID says they were first posted well before the time frame: for the past 24 hours,
+    an ID more than 3 days older than the newest ones."""
+    newest = NEWEST_JOB_ID["id"]
+    limit = window.total_seconds() / 86400 + REPOST_MARGIN_DAYS
+    for job in jobs:
+        job.likely_repost = newest > 0 and (newest - int(job.id)) / JOB_IDS_PER_DAY > limit
+
+
 def run_search(session: requests.Session, search: dict, settings: dict) -> tuple[list[Job], str | None]:
     """Jobs matching the search, and why it stopped early (None if it didn't).
     Raises if not even the first page could be loaded."""
@@ -444,6 +463,7 @@ def run_search(session: requests.Session, search: dict, settings: dict) -> tuple
                 stopped = f"stopped after page {page} of {max_pages}: a results page couldn't be read"
             break
         scanned += len(jobs)
+        NEWEST_JOB_ID["id"] = max(NEWEST_JOB_ID["id"], *(int(j.id) for j in jobs))
         for job in jobs:
             if job.posted_date and job.posted_date < oldest:
                 continue
@@ -751,6 +771,8 @@ def describe_search(search: dict, settings: dict) -> str:
         parts.append("also " + ", ".join(also))
     if option(search, settings, "similar_titles", True):
         parts.append("similar titles")
+    if not option(search, settings, "include_reposts", True):
+        parts.append("no reposts")
     if wanted := parse_terms(option(search, settings, "term", None)):
         parts.append(" or ".join(term_label(t) for t in sorted(wanted)) + " only")
     return " · ".join(parts)
@@ -826,7 +848,8 @@ def render_text(r: Report) -> str:
         lines += [f"== {search['title']} ({len(group)}) ==", ""]
         for j in group:
             lines.append(j.title)
-            lines.append("  " + " · ".join(filter(None, [j.company, where(j), j.posted, j.term, j.salary])))
+            lines.append("  " + " · ".join(filter(None, [j.company, where(j), j.posted, j.term, j.salary,
+                                                          "likely repost" if j.likely_repost else ""])))
             lines += [f"  {j.url}", ""]
     if not r.jobs and not nothing_ran_ok(r):
         lines.append(checkin_note(r) if r.checkin_days else "No new postings matched your searches.")
@@ -864,6 +887,7 @@ def job_html(job: Job) -> str:
     place = " · ".join(filter(None, [where(job), job.posted]))
     pills = (pill_html(job.term, good=job.term_ok) if job.term else "") + \
             (pill_html("Early applicant", good=True) if job.early_applicant else "") + \
+            (pill_html("Likely repost") if job.likely_repost else "") + \
             (pill_html(job.salary) if job.salary else "")
     return (
         f'<tr><td class="rule" style="padding:16px 0;border-top:1px solid {RULE}">'
@@ -1073,6 +1097,8 @@ def main() -> int:
     settings = config.get("settings", {})
     searches = config["search"]
     seen = load_seen()
+    state = load_state()
+    NEWEST_JOB_ID["id"] = int(state.get("newest_job_id", 0))
     if args.lookback:
         window = parse_window(args.lookback, "--lookback")
         settings = {**settings, "posted_within": args.lookback}
@@ -1111,6 +1137,13 @@ def main() -> int:
         if stopped:
             partial.append(search["title"])
         fresh = merge_duplicates([j for j in jobs if j.id not in seen and j.id not in new and j.id not in skipped])
+        mark_reposts(fresh, parse_window(option(search, settings, "posted_within", "24h")))
+        if not option(search, settings, "include_reposts", True):
+            reposts = [j for j in fresh if j.likely_repost]
+            fresh = [j for j in fresh if not j.likely_repost]
+            skipped.update(job_id for j in reposts for job_id in (j.id, *j.duplicate_ids))
+            if reposts:
+                log(f"  skipped {plural(len(reposts), 'likely repost')}")
         wanted_terms = parse_terms(option(search, settings, "term", None))
         if wanted_terms and fresh:
             try:
@@ -1139,7 +1172,7 @@ def main() -> int:
         print("\n" + render_text(report), flush=True)
         return 0
 
-    state = load_state()
+    state["newest_job_id"] = NEWEST_JOB_ID["id"]
     now = datetime.now()
     last_alert = datetime.fromisoformat(state["last_alert"]) if "last_alert" in state else now
     checkin_days = float(settings.get("checkin_days", 3))
