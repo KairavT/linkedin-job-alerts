@@ -708,6 +708,23 @@ def load_state() -> dict:
     return read_json(STATE_FILE, "check-in history")
 
 
+def state_number(state: dict, key: str) -> int:
+    """A count or job ID from state.json, or 0 if it's missing or isn't a number (say, after a hand edit)."""
+    try:
+        return int(state.get(key) or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def state_time(state: dict, key: str, default: datetime) -> datetime:
+    """A time from state.json in local time, or `default` if it's missing or isn't a time."""
+    try:
+        when = datetime.fromisoformat(state[key])
+    except (KeyError, TypeError, ValueError):
+        return default
+    return when.astimezone().replace(tzinfo=None) if when.tzinfo else when
+
+
 def save_state(state: dict) -> None:
     tmp = STATE_FILE.with_suffix(".tmp")
     tmp.write_text(json.dumps(state, indent=2), encoding="utf-8")
@@ -1098,7 +1115,7 @@ def main() -> int:
     searches = config["search"]
     seen = load_seen()
     state = load_state()
-    NEWEST_JOB_ID["id"] = int(state.get("newest_job_id", 0))
+    NEWEST_JOB_ID["id"] = state_number(state, "newest_job_id")
     if args.lookback:
         window = parse_window(args.lookback, "--lookback")
         settings = {**settings, "posted_within": args.lookback}
@@ -1174,11 +1191,11 @@ def main() -> int:
 
     state["newest_job_id"] = NEWEST_JOB_ID["id"]
     now = datetime.now()
-    last_alert = datetime.fromisoformat(state["last_alert"]) if "last_alert" in state else now
+    last_alert = state_time(state, "last_alert", now)  # first run: start counting from now
     checkin_days = float(settings.get("checkin_days", 3))
     run_failed = bool(failures or partial)
-    state["runs_since_alert"] = state.get("runs_since_alert", 0) + 1
-    state["failed_runs_since_alert"] = state.get("failed_runs_since_alert", 0) + run_failed
+    state["runs_since_alert"] = state_number(state, "runs_since_alert") + 1
+    state["failed_runs_since_alert"] = state_number(state, "failed_runs_since_alert") + run_failed
     # Searches that didn't finish don't cause an email on their own: the next run's time frame overlaps
     # this one, so it picks up whatever was missed. They're mentioned when an email goes out anyway,
     # and the check-in email says if runs keep failing.
@@ -1191,12 +1208,13 @@ def main() -> int:
         if not notify(report):
             log("No notification went through; not marking jobs as seen so they're retried next run")
             return 1
-        state.update(last_alert=now.isoformat(timespec="seconds"), runs_since_alert=0, failed_runs_since_alert=0)
+        last_alert = now
+        state.update(runs_since_alert=0, failed_runs_since_alert=0)
     elif run_failed:
         log("Nothing new; some searches didn't finish, so the next run will pick them up (no email for that alone)")
     else:
         log("Nothing new; no notification sent")
-    state.setdefault("last_alert", now.isoformat(timespec="seconds"))  # first run: start counting from now
+    state["last_alert"] = last_alert.isoformat(timespec="seconds")
     save_state(state)
 
     today = date.today().isoformat()
