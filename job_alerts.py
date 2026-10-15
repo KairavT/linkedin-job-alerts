@@ -234,7 +234,9 @@ EXPANSIONS = {"swe": "software engineer", "sde": "software engineer", "sdet": "s
 IMPLIED = {"software": {"developer", "programmer", "frontend", "backend", "fullstack", "web", "mobile",
                         "ios", "android", "développeur", "développeuse", "logiciel"}}
 STOPWORDS = {"a", "an", "and", "at", "for", "in", "of", "on", "or", "the", "to", "with"}
-TOKEN_RE = re.compile(r"\.?[^\W_][\w+#]*(?:\.\w+)*")
+# Letters joined by "." or "&" stay one word: "node.js", and "AI&T" (assembly, integration and test)
+# or "R&D" aren't read as "AI" or "R".
+TOKEN_RE = re.compile(r"\.?[^\W_][\w+#]*(?:[.&]\w+)*")
 
 
 def singular(word: str) -> str:
