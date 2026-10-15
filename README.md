@@ -45,45 +45,113 @@ Scraping LinkedIn goes against its User Agreement. This only reads public job li
 - launchd, cron, or Task Scheduler
 - ntfy
 
-## How to Run
+## Setting it up
+You don't need to know how to code to set this up. It takes about 15 minutes and you only do it once. A few steps use the Terminal (on a Mac) or PowerShell (on Windows), which is a window where you type a command and press Enter. Each command below is meant to be copied in exactly as written.
+
+### 1. Install Python
+The script is written in Python, so your computer needs Python 3.11 or newer. Download it from [python.org/downloads](https://www.python.org/downloads/) and run the installer. On Windows, tick the box that says "Add python.exe to PATH" on the first screen of the installer, or the commands below won't find it.
+
+### 2. Download the project
+At the top of this page, click the green Code button, then Download ZIP. Unzip it and move the folder somewhere you'll keep it, like your Documents folder. The folder may be called `linkedin-job-alerts-main`, which is fine. (If you use git, `git clone https://github.com/KairavT/linkedin-job-alerts.git` does the same thing.)
+
+### 3. Open a terminal in the project folder
+On a Mac, open Terminal (search for it with Spotlight), type `cd` followed by a space, drag the project folder into the Terminal window, and press Enter.
+
+On Windows, open the project folder in File Explorer, click the address bar at the top, type `powershell`, and press Enter.
+
+Keep this window open, since every command in the next steps goes into it.
+
+### 4. Install what the script needs
+This creates a folder called `venv` inside the project that holds the two small libraries the script uses, so nothing else on your computer is changed.
+
+On a Mac or Linux:
 ```bash
-git clone https://github.com/KairavT/linkedin-job-alerts.git
-cd linkedin-job-alerts
 python3 -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
-cp .env.example .env
-cp config.example.toml config.toml
-python3 job_alerts.py --preview
+venv/bin/pip install -r requirements.txt
 ```
-On Windows, use `python` instead of `python3`, `venv\Scripts\activate` instead of `source venv/bin/activate`, and `copy` instead of `cp`.
+On Windows:
+```powershell
+python -m venv venv
+venv\Scripts\pip install -r requirements.txt
+```
 
-Fill in `.env` with a Gmail address and an [app password](https://myaccount.google.com/apppasswords) (a normal Gmail password will not work), or an ntfy topic, and put the jobs to search for in `config.toml`. `--preview` opens the email in the browser without sending anything, `--dry-run` prints the results instead, and `--test-notify` sends a test alert. `--lookback` does a one-off catch-up over the past 48 hours, for example after the computer was off for a day or two. A different time frame can be given, like `--lookback 3d`, but the point is to spot jobs early, so it is kept short by default.
+### 5. Get a Gmail app password
+The alerts are sent from your own Gmail account. Gmail does not let scripts use your normal password, so you make an app password, which is a separate 16 letter password just for this. First make sure 2-Step Verification is turned on for your Google account. Then go to [myaccount.google.com/apppasswords](https://myaccount.google.com/apppasswords), create an app password called "job alerts", and copy the 16 letters it shows you.
 
-## Running it on a schedule
-The script only runs when something starts it, so it needs your computer's scheduler to start it at the times you want. These examples run it at 8am and 8pm.
+### 6. Fill in your email settings
+This makes your own copy of the email settings file and opens it.
 
-### macOS
+On a Mac:
 ```bash
-./schedule.sh 8:00 20:00
+cp .env.example .env
+open -e .env
 ```
-This sets up a launchd job. Any number of times works, like `./schedule.sh 8:00` for once a day. `./schedule.sh --remove` stops it, and the output of each run goes to `logs/job_alerts.log`.
-
-The Mac has to be on and awake at the scheduled times for the email to arrive on time. If it is asleep (for example with the lid closed), macOS may still start the run during one of the short background wakes it does while sleeping, but those only last a few seconds, so the run finishes once the Mac is opened again and the email arrives then. If several runs were missed while it slept they are combined into one. If the Mac is shut down at a scheduled time, that run is skipped.
-
-### Linux
-Run `crontab -e` and add this line, with the path to your copy of the project:
+On Windows:
+```powershell
+copy .env.example .env
+notepad .env
 ```
-0 8,20 * * * /path/to/linkedin-job-alerts/venv/bin/python /path/to/linkedin-job-alerts/job_alerts.py --log logs/job_alerts.log
-```
-`--log` makes the script write its own log file, in the project's `logs` folder. cron skips any run that comes up while the computer is asleep or off.
+Put your Gmail address right after `SMTP_USER=`, the 16 letter app password right after `SMTP_PASSWORD=`, and the address you want the alerts sent to right after `EMAIL_TO=` (this can be the same Gmail address). Then save and close the file. This file stays on your computer and is never uploaded anywhere.
 
-### Windows
-In PowerShell, from the project folder:
+### 7. Choose the jobs to search for
+This makes your own copy of the search settings and opens it.
+
+On a Mac:
+```bash
+cp config.example.toml config.toml
+open -e config.toml
+```
+On Windows:
+```powershell
+copy config.example.toml config.toml
+notepad config.toml
+```
+Each `[[search]]` block near the bottom is one search. Change the `title` and `location` to the job you want, and copy a block to add another search or delete one to remove it. For example:
+```toml
+[[search]]
+title = "Software Engineer Co-op"
+location = "Canada"
+```
+The settings at the top apply to every search, and each one has a note next to it saying what it does. The ones you are most likely to change are `posted_within` (how far back to look), `term` (only co-ops for one work term, like "Winter 2027"), `include_reposts` (whether to keep old jobs reposted as new), and `block_titles` and `block_companies` (titles and companies to skip). A line that starts with `#` is switched off, so delete the `#` and the space after it to switch one on.
+
+Text in this file has to be inside straight quotes ("), not curly ones (“), or the file won't load. TextEdit on a Mac changes quotes to curly ones as you type, so turn that off first under Edit, then Substitutions, then Smart Quotes.
+
+### 8. Try it out
+On a Mac or Linux:
+```bash
+venv/bin/python job_alerts.py --preview
+```
+On Windows:
+```powershell
+venv\Scripts\python job_alerts.py --preview
+```
+This searches LinkedIn and opens the email it would send in your browser, without sending anything. It can take a few minutes, because LinkedIn limits how quickly it can be searched. If the jobs look right, send yourself a test email by running the same command with `--test-notify` instead of `--preview`. If the test email doesn't arrive, double check the address and app password in `.env`.
+
+### 9. Make it run every day
+The script only runs when something starts it, so the last step is telling your computer's scheduler to start it at the times you want. These examples run it at 8am and 8pm. The computer has to be on at those times for the email to arrive on time.
+
+On a Mac:
+```bash
+bash schedule.sh 8:00 20:00
+```
+Any number of times works, like `bash schedule.sh 8:00` for once a day, and `bash schedule.sh --remove` stops it. The output of each run goes to `logs/job_alerts.log` in the project folder.
+
+If the Mac is asleep at a scheduled time (for example with the lid closed), macOS may still start the run during one of the short background wakes it does while sleeping, but those only last a few seconds, so the run finishes once the Mac is opened again and the email arrives then. If several runs were missed while it slept they are combined into one. If the Mac is shut down at a scheduled time, that run is skipped.
+
+On Windows, paste these four lines into PowerShell (still in the project folder):
 ```powershell
 $dir = (Get-Location).Path
 $action = New-ScheduledTaskAction -Execute "$dir\venv\Scripts\pythonw.exe" -Argument "job_alerts.py --log logs\job_alerts.log" -WorkingDirectory $dir
 $times = (New-ScheduledTaskTrigger -Daily -At 8am), (New-ScheduledTaskTrigger -Daily -At 8pm)
 Register-ScheduledTask -TaskName "LinkedIn job alerts" -Action $action -Trigger $times -Settings (New-ScheduledTaskSettingsSet -StartWhenAvailable)
 ```
-`pythonw.exe` runs the script without opening a window, and `--log` makes it write its own log file, since Task Scheduler does not save output. If the computer was asleep or off at a scheduled time, the run starts as soon as it is back on. `Unregister-ScheduledTask -TaskName "LinkedIn job alerts"` stops it.
+This runs it in the background without opening a window, and keeps a log in `logs\job_alerts.log`. If the computer was asleep or off at a scheduled time, the run starts as soon as it is back on. To stop it, run `Unregister-ScheduledTask -TaskName "LinkedIn job alerts"`.
+
+On Linux, run `crontab -e` and add this line, replacing both `/path/to/linkedin-job-alerts` with where the project folder is (the `pwd` command shows it):
+```
+0 8,20 * * * /path/to/linkedin-job-alerts/venv/bin/python /path/to/linkedin-job-alerts/job_alerts.py --log logs/job_alerts.log
+```
+cron skips any run that comes up while the computer is asleep or off.
+
+### Other options
+To also get a notification on your phone, install the free ntfy app, subscribe to a topic name that only you would guess, and put that name right after `NTFY_TOPIC=` in `.env`. `--dry-run` shows the results in the terminal instead of the browser. `--lookback` does a one-off catch-up over the past 48 hours, for example after the computer was off for a day or two, and a different time frame can be given, like `--lookback 3d`, but it is kept short by default since the point is to spot jobs early.
