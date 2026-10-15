@@ -24,6 +24,8 @@ block_titles = []         # skip jobs whose title has any of these words, e.g. [
 block_companies = []      # skip jobs from these companies, e.g. ["Revature", "Jobot"]
 include_reposts = true    # false = skip jobs LinkedIn shows as new that were really posted days earlier and
                           # reposted (they often have 100+ applicants); true keeps them, labelled
+repost_applicants = 100   # with include_reposts = false, only skip a likely repost once its page shows this
+                          # many applicants, since some were just drafted early (0 = skip them all unchecked)
 # Extra groups of interchangeable title words, on top of the built-in ones in job_alerts.py
 # (intern/co-op/internship/student, engineer/developer, junior/entry level/new grad, swe, ml, ...):
 # synonyms = [["designer", "ux"], ["devops", "platform", "infrastructure"]]

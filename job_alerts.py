@@ -100,6 +100,7 @@ class Job:
     logo: str = ""
     early_applicant: bool = False
     likely_repost: bool = False
+    applicants: str = ""  # e.g. "Over 200 applicants", when the job's page was checked
     term: str = ""         # e.g. "Winter 2027" or "Term not stated", when filtering by term
     term_ok: bool = False  # the posting says it's in the wanted term
     duplicate_ids: list[str] = field(default_factory=list)    # same job listed again (other cities, reposts)
@@ -627,17 +628,84 @@ def term_label(term: tuple[str, int]) -> str:
     return f"{term[0].capitalize()} {term[1]}"
 
 
+JOB_PAGES: dict[str, BeautifulSoup | None] = {}  # job pages loaded this run, so none is loaded twice
+
+
+def fetch_job_page(session: requests.Session, job_id: str) -> BeautifulSoup | None:
+    """A job's own page (description, applicant count), or None if it couldn't be loaded."""
+    if job_id not in JOB_PAGES:
+        time.sleep(random.uniform(3, 6))
+        try:
+            JOB_PAGES[job_id] = BeautifulSoup(fetch(session, JOB_URL.format(job_id)), "html.parser")
+        except OutOfTime:
+            raise
+        except Exception as e:
+            log(f"  couldn't load the page of job {job_id}: {e}")
+            JOB_PAGES[job_id] = None
+    return JOB_PAGES[job_id]
+
+
 def fetch_description(session: requests.Session, job_id: str) -> str | None:
-    try:
-        html = fetch(session, JOB_URL.format(job_id))
-    except OutOfTime:
-        raise
-    except Exception as e:
-        log(f"  couldn't load the description of job {job_id}: {e}")
+    page = fetch_job_page(session, job_id)
+    if page is None:
         return None
-    el = BeautifulSoup(html, "html.parser").select_one(".show-more-less-html__markup, .description__text")
+    el = page.select_one(".show-more-less-html__markup, .description__text")
     DESCRIPTION_PAGES["read" if el else "unreadable"] += 1
     return el.get_text(" ", strip=True) if el else ""
+
+
+def parse_applicants(text: str) -> tuple[int, str] | None:
+    """LinkedIn's applicant caption as (a number to compare, a short label), e.g.
+    "Over 200 applicants" -> (201, "Over 200 applicants"), "Be among the first 25 applicants" ->
+    (24, "Under 25 applicants"), "114 applicants" -> (114, "114 applicants")."""
+    t = text.lower().replace(",", "")
+    if m := re.search(r"over (\d+)", t):
+        return int(m[1]) + 1, f"Over {m[1]} applicants"
+    if m := re.search(r"first (\d+)", t):
+        return int(m[1]) - 1, f"Under {m[1]} applicants"
+    if m := re.search(r"(\d+) applicant", t):
+        return int(m[1]), f"{m[1]} applicant{'' if m[1] == '1' else 's'}"
+    return None
+
+
+def applicant_count(session: requests.Session, job: Job) -> int | None:
+    """How many people have applied, from the job's page (None if it can't be read)."""
+    page = fetch_job_page(session, job.id)
+    el = page.select_one(".num-applicants__caption") if page else None
+    parsed = parse_applicants(el.get_text(" ", strip=True)) if el else None
+    if parsed is None:
+        return None
+    job.applicants = parsed[1]
+    return parsed[0]
+
+
+def filter_reposts(session: requests.Session, jobs: list[Job], min_applicants: int) -> tuple[list[Job], list[Job], int]:
+    """Split off likely reposts that already have at least `min_applicants` applicants, checked on the
+    job's page (0 = skip every likely repost without checking). Likely reposts with fewer, or whose
+    count can't be read, are kept and labelled: often they were drafted days before going up, and are
+    as fresh as any other posting. The third value counts likely reposts left for the next run because
+    the run ran out of time."""
+    kept, skipped, unchecked = [], [], 0
+    for job in jobs:
+        if not job.likely_repost:
+            kept.append(job)
+        elif min_applicants <= 0:
+            skipped.append(job)
+        elif unchecked:
+            unchecked += 1
+        else:
+            try:
+                count = applicant_count(session, job)
+            except OutOfTime:
+                unchecked += 1
+                continue
+            (skipped if count is not None and count >= min_applicants else kept).append(job)
+    reposts_kept = sum(j.likely_repost for j in kept)
+    if skipped or reposts_kept or unchecked:
+        log(f"  likely reposts: {len(skipped)} skipped, {reposts_kept} kept"
+            + (f" (fewer than {min_applicants} applicants)" if min_applicants > 0 else "")
+            + (f", {unchecked} left for the next run (out of time)" if unchecked else ""))
+    return kept, skipped, unchecked
 
 
 def filter_by_term(session: requests.Session, jobs: list[Job], wanted: set[tuple[str, int]],
@@ -654,7 +722,6 @@ def filter_by_term(session: requests.Session, jobs: list[Job], wanted: set[tuple
                 unchecked += 1
                 continue
             try:
-                time.sleep(random.uniform(3, 6))
                 terms = find_terms(fetch_description(session, job.id) or "", today)
             except OutOfTime:
                 unchecked += 1
@@ -706,6 +773,23 @@ def save_seen(seen: dict[str, str]) -> None:
 
 def load_state() -> dict:
     return read_json(STATE_FILE, "check-in history")
+
+
+def state_number(state: dict, key: str) -> int:
+    """A count or job ID from state.json, or 0 if it's missing or isn't a number (say, after a hand edit)."""
+    try:
+        return int(state.get(key) or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def state_time(state: dict, key: str, default: datetime) -> datetime:
+    """A time from state.json in local time, or `default` if it's missing or isn't a time."""
+    try:
+        when = datetime.fromisoformat(state[key])
+    except (KeyError, TypeError, ValueError):
+        return default
+    return when.astimezone().replace(tzinfo=None) if when.tzinfo else when
 
 
 def save_state(state: dict) -> None:
@@ -772,7 +856,8 @@ def describe_search(search: dict, settings: dict) -> str:
     if option(search, settings, "similar_titles", True):
         parts.append("similar titles")
     if not option(search, settings, "include_reposts", True):
-        parts.append("no reposts")
+        need = int(option(search, settings, "repost_applicants", 100))
+        parts.append(f"no reposts with {need}+ applicants" if need > 0 else "no reposts")
     if wanted := parse_terms(option(search, settings, "term", None)):
         parts.append(" or ".join(term_label(t) for t in sorted(wanted)) + " only")
     return " · ".join(parts)
@@ -849,7 +934,8 @@ def render_text(r: Report) -> str:
         for j in group:
             lines.append(j.title)
             lines.append("  " + " · ".join(filter(None, [j.company, where(j), j.posted, j.term, j.salary,
-                                                          "likely repost" if j.likely_repost else ""])))
+                                                          "likely repost" if j.likely_repost else "",
+                                                          j.applicants])))
             lines += [f"  {j.url}", ""]
     if not r.jobs and not nothing_ran_ok(r):
         lines.append(checkin_note(r) if r.checkin_days else "No new postings matched your searches.")
@@ -888,6 +974,7 @@ def job_html(job: Job) -> str:
     pills = (pill_html(job.term, good=job.term_ok) if job.term else "") + \
             (pill_html("Early applicant", good=True) if job.early_applicant else "") + \
             (pill_html("Likely repost") if job.likely_repost else "") + \
+            (pill_html(job.applicants) if job.applicants else "") + \
             (pill_html(job.salary) if job.salary else "")
     return (
         f'<tr><td class="rule" style="padding:16px 0;border-top:1px solid {RULE}">'
@@ -1098,7 +1185,7 @@ def main() -> int:
     searches = config["search"]
     seen = load_seen()
     state = load_state()
-    NEWEST_JOB_ID["id"] = int(state.get("newest_job_id", 0))
+    NEWEST_JOB_ID["id"] = state_number(state, "newest_job_id")
     if args.lookback:
         window = parse_window(args.lookback, "--lookback")
         settings = {**settings, "posted_within": args.lookback}
@@ -1112,6 +1199,7 @@ def main() -> int:
     session = requests.Session()
     session.headers.update(HEADERS)
     DESCRIPTION_PAGES.update(read=0, unreadable=0)
+    JOB_PAGES.clear()
     unreadable = []
     new: dict[str, Job] = {}
     skipped: set[str] = set()  # wrong term; remembered so their descriptions aren't fetched again
@@ -1139,11 +1227,11 @@ def main() -> int:
         fresh = merge_duplicates([j for j in jobs if j.id not in seen and j.id not in new and j.id not in skipped])
         mark_reposts(fresh, parse_window(option(search, settings, "posted_within", "24h")))
         if not option(search, settings, "include_reposts", True):
-            reposts = [j for j in fresh if j.likely_repost]
-            fresh = [j for j in fresh if not j.likely_repost]
+            fresh, reposts, unchecked_reposts = filter_reposts(
+                session, fresh, int(option(search, settings, "repost_applicants", 100)))
             skipped.update(job_id for j in reposts for job_id in (j.id, *j.duplicate_ids))
-            if reposts:
-                log(f"  skipped {plural(len(reposts), 'likely repost')}")
+            if unchecked_reposts and search["title"] not in partial:
+                partial.append(search["title"])
         wanted_terms = parse_terms(option(search, settings, "term", None))
         if wanted_terms and fresh:
             try:
@@ -1154,7 +1242,7 @@ def main() -> int:
                 failures.append(search["title"])
                 continue
             skipped.update(job_id for j in dropped for job_id in (j.id, *j.duplicate_ids))
-            if unchecked and not stopped:
+            if unchecked and search["title"] not in partial:
                 partial.append(search["title"])
         log(f"  {len(fresh)} new since last run")
         new.update((j.id, j) for j in fresh)
@@ -1174,11 +1262,11 @@ def main() -> int:
 
     state["newest_job_id"] = NEWEST_JOB_ID["id"]
     now = datetime.now()
-    last_alert = datetime.fromisoformat(state["last_alert"]) if "last_alert" in state else now
+    last_alert = state_time(state, "last_alert", now)  # first run: start counting from now
     checkin_days = float(settings.get("checkin_days", 3))
     run_failed = bool(failures or partial)
-    state["runs_since_alert"] = state.get("runs_since_alert", 0) + 1
-    state["failed_runs_since_alert"] = state.get("failed_runs_since_alert", 0) + run_failed
+    state["runs_since_alert"] = state_number(state, "runs_since_alert") + 1
+    state["failed_runs_since_alert"] = state_number(state, "failed_runs_since_alert") + run_failed
     # Searches that didn't finish don't cause an email on their own: the next run's time frame overlaps
     # this one, so it picks up whatever was missed. They're mentioned when an email goes out anyway,
     # and the check-in email says if runs keep failing.
@@ -1191,12 +1279,13 @@ def main() -> int:
         if not notify(report):
             log("No notification went through; not marking jobs as seen so they're retried next run")
             return 1
-        state.update(last_alert=now.isoformat(timespec="seconds"), runs_since_alert=0, failed_runs_since_alert=0)
+        last_alert = now
+        state.update(runs_since_alert=0, failed_runs_since_alert=0)
     elif run_failed:
         log("Nothing new; some searches didn't finish, so the next run will pick them up (no email for that alone)")
     else:
         log("Nothing new; no notification sent")
-    state.setdefault("last_alert", now.isoformat(timespec="seconds"))  # first run: start counting from now
+    state["last_alert"] = last_alert.isoformat(timespec="seconds")
     save_state(state)
 
     today = date.today().isoformat()
