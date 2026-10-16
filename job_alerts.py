@@ -101,6 +101,7 @@ class Job:
     early_applicant: bool = False
     likely_repost: bool = False
     applicants: str = ""  # e.g. "Over 200 applicants", when the job's page was checked
+    maybe_not_coop: bool = False  # only matched thanks to a phrase like "Students Welcome"
     term: str = ""         # e.g. "Winter 2027" or "Term not stated", when filtering by term
     term_ok: bool = False  # the posting says it's in the wanted term
     duplicate_ids: list[str] = field(default_factory=list)    # same job listed again (other cities, reposts)
@@ -246,6 +247,13 @@ STOPWORDS = {"a", "an", "and", "at", "for", "in", "of", "on", "or", "the", "to",
 # Letters joined by "." or "&" stay one word: "node.js", and "AI&T" (assembly, integration and test)
 # or "R&D" aren't read as "AI" or "R".
 TOKEN_RE = re.compile(r"\.?[^\W_][\w+#]*(?:[.&]\w+)*")
+# Phrases that only say who can apply, like "Students Welcome" or "Open to Students". A title can mention
+# students this way without the job being a co-op or internship (say, a part-time gig), so a job that only
+# matches a co-op search because of one is kept but labelled, rather than dropped.
+WHO_CAN_APPLY_RE = re.compile(
+    r"(?<!\w)(?:students?|interns?|co-?ops?|new grads?|graduates?)\s+(?:are\s+)?"
+    r"(?:welcome|encouraged(?:\s+to\s+apply)?|eligible|preferred|wanted|may apply|can apply)(?!\w)"
+    r"|(?<!\w)open\s+to\s+(?:students|new grads|graduates)(?!\w)", re.I)
 
 
 def singular(word: str) -> str:
@@ -471,6 +479,9 @@ def run_search(session: requests.Session, search: dict, settings: dict) -> tuple
             words = matcher.words(job.title)
             if must_match and not any(w <= words for w in wanted):
                 continue
+            if must_match and WHO_CAN_APPLY_RE.search(job.title):
+                without = matcher.words(WHO_CAN_APPLY_RE.sub(" ", job.title))
+                job.maybe_not_coop = not any(w <= without for w in wanted)
             if any(u and u <= words for u in unwanted) or (blocked_company and blocked_company.search(job.company.lower())):
                 blocked += 1
                 continue
@@ -934,6 +945,7 @@ def render_text(r: Report) -> str:
         for j in group:
             lines.append(j.title)
             lines.append("  " + " · ".join(filter(None, [j.company, where(j), j.posted, j.term, j.salary,
+                                                          "may not be a co-op or internship" if j.maybe_not_coop else "",
                                                           "likely repost" if j.likely_repost else "",
                                                           j.applicants])))
             lines += [f"  {j.url}", ""]
@@ -973,6 +985,7 @@ def job_html(job: Job) -> str:
     place = " · ".join(filter(None, [where(job), job.posted]))
     pills = (pill_html(job.term, good=job.term_ok) if job.term else "") + \
             (pill_html("Early applicant", good=True) if job.early_applicant else "") + \
+            (pill_html("May not be a co-op or internship") if job.maybe_not_coop else "") + \
             (pill_html("Likely repost") if job.likely_repost else "") + \
             (pill_html(job.applicants) if job.applicants else "") + \
             (pill_html(job.salary) if job.salary else "")
