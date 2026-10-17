@@ -48,9 +48,10 @@ experience = ["entry"]
 block_titles = ["senior", "staff", "principal", "lead", "manager", "intern"]  # "intern" also blocks co-ops
 
 # A search can also follow companies, instead of a title or as well as one. Each search needs a title,
-# companies, or both. Use the company names as they appear on LinkedIn.
+# companies, or both. Use the company names as they appear on LinkedIn (case and accents don't matter).
 # [[search]]
 # companies = ["Bombardier", "Cohere"]       # every new posting from these companies, whatever the title
+# name = "Dream companies"                   # what this search is called in the email (optional)
 # location = "Canada"
 # term = []                                  # [] switches off the term filter from [settings], for this search
 #
