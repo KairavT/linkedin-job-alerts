@@ -46,3 +46,15 @@ title = "Software Engineer"
 location = "United States"
 experience = ["entry"]
 block_titles = ["senior", "staff", "principal", "lead", "manager", "intern"]  # "intern" also blocks co-ops
+
+# A search can also follow companies, instead of a title or as well as one. Each search needs a title,
+# companies, or both. Use the company names as they appear on LinkedIn.
+# [[search]]
+# companies = ["Bombardier", "Cohere"]       # every new posting from these companies, whatever the title
+# location = "Canada"
+# term = []                                  # [] switches off the term filter from [settings], for this search
+#
+# [[search]]
+# title = "Data Science Co-op"
+# companies = ["RBC"]                        # only Data Science Co-op postings at RBC
+# location = "Canada"

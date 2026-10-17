@@ -122,7 +122,7 @@ class Report:
 
     def groups(self) -> list[tuple[dict, list[Job]]]:
         """Each search with its new jobs, in config order."""
-        return [(s, [j for j in self.jobs if j.search == s["title"]]) for s in self.searches]
+        return [(s, [j for j in self.jobs if j.search == search_name(s)]) for s in self.searches]
 
 
 def log(msg: str) -> None:
@@ -155,8 +155,8 @@ def load_config(path: Path) -> dict:
     if not config.get("search"):
         sys.exit(f"{path}: add at least one [[search]] block")
     for search in config["search"]:
-        if not search.get("title"):
-            sys.exit(f"{path}: every [[search]] needs a title")
+        if not search.get("title") and not any(str(c).strip() for c in as_list(search.get("companies"))):
+            sys.exit(f"{path}: every [[search]] needs a title, companies to follow, or both")
     return config
 
 
@@ -208,7 +208,7 @@ def build_params(search: dict, window: timedelta, keywords: str) -> dict:
         values = as_list(search.get(key))
         unknown = [v for v in values if v not in codes]
         if unknown:
-            sys.exit(f"Unknown {key} {unknown} in search {search['title']!r}; choose from {list(codes)}")
+            sys.exit(f"Unknown {key} {unknown} in search {search_name(search)!r}; choose from {list(codes)}")
         if values:
             params[param] = ",".join(codes[v] for v in values)
     return {k: v for k, v in params.items() if v}
@@ -254,6 +254,11 @@ WHO_CAN_APPLY_RE = re.compile(
     r"(?<!\w)(?:students?|interns?|co-?ops?|new grads?|graduates?)\s+(?:are\s+)?"
     r"(?:welcome|encouraged(?:\s+to\s+apply)?|eligible|preferred|wanted|may apply|can apply)(?!\w)"
     r"|(?<!\w)open\s+to\s+(?:students|new grads|graduates)(?!\w)", re.I)
+
+
+def quote_term(term: str) -> str:
+    """A word or name as a LinkedIn search term: quoted if it has spaces or symbols."""
+    return f'"{term}"' if re.search(r"\W", term) else term
 
 
 def singular(word: str) -> str:
@@ -322,7 +327,7 @@ class TitleMatcher:
                 key = self._canon(token)
                 if key in STOPWORDS:
                     continue
-                alts = [f'"{w}"' if re.search(r"\W", w) else w for w in self.query_terms.get(key, [token])]
+                alts = [quote_term(w) for w in self.query_terms.get(key, [token])]
                 terms.append(alts[0] if len(alts) == 1 else f"({' OR '.join(alts)})")
             parts.append(" ".join(terms))
         parts = list(dict.fromkeys(parts))  # "Software Engineer" and "Software Developer" become one query
@@ -428,65 +433,96 @@ def mark_reposts(jobs: list[Job], window: timedelta) -> None:
         job.likely_repost = newest > 0 and (newest - int(job.id)) / JOB_IDS_PER_DAY > limit
 
 
+def company_pattern(names: list[str]) -> re.Pattern | None:
+    """Matches any of these company names as whole words, ignoring case: "Amazon" also matches
+    "Amazon Web Services (AWS)", but not "Amazonia"."""
+    names = [str(n).strip().lower() for n in names if str(n).strip()]
+    return re.compile("|".join(rf"(?<!\w){re.escape(n)}(?!\w)" for n in names)) if names else None
+
+
+def search_name(search: dict) -> str:
+    """How a search is named in the log and the email: its title, the companies it follows, or both."""
+    title, companies = search.get("title"), as_list(search.get("companies"))
+    if title and companies:
+        return f"{title} at {', '.join(companies)}"
+    return title or f"All jobs at {', '.join(companies)}"
+
+
 def run_search(session: requests.Session, search: dict, settings: dict) -> tuple[list[Job], str | None]:
     """Jobs matching the search, and why it stopped early (None if it didn't).
     Raises if not even the first page could be loaded."""
+    name = search_name(search)
     window = parse_window(option(search, settings, "posted_within", "24h"))
     max_pages = int(option(search, settings, "max_pages", 10))
     matcher = TitleMatcher(option(search, settings, "similar_titles", True), synonym_groups(settings))
-    titles = [search["title"], *as_list(search.get("also"))]
-    params = build_params(search, window, matcher.query(titles))
+    titles = [search["title"], *as_list(search.get("also"))] if search.get("title") else []
+    # A search follows companies, titles, or both. With companies there's one LinkedIn query per company:
+    # its name plus the title query, if any. LinkedIn ranks the company's own postings first.
+    title_query = matcher.query(titles) if titles else ""
+    followed = [c for c in as_list(search.get("companies")) if str(c).strip()]
+    queries = [(c, f'{quote_term(c)} {title_query}'.strip()) for c in followed] or [(None, title_query)]
     # LinkedIn's keyword search also matches descriptions and fuzzes heavily, so by default
     # keep only jobs whose title covers every word of one of the wanted titles.
-    must_match = option(search, settings, "title_must_match", True)
+    must_match = bool(titles) and option(search, settings, "title_must_match", True)
     # (a title with no real words, like "the", would otherwise match every job)
     wanted = [c for c in map(matcher.concepts, titles) if c]
     # "exclude" is the old name for block_titles and still works.
     unwanted = [matcher.concepts(w) for w in block_list(search, settings, "block_titles", "exclude")]
-    # Company names match as whole words, ignoring case: "Amazon" also blocks "Amazon Web Services (AWS)".
-    companies = [c for c in block_list(search, settings, "block_companies") if c.strip()]
-    blocked_company = re.compile("|".join(rf"(?<!\w){re.escape(c.strip().lower())}(?!\w)" for c in companies)) \
-        if companies else None
+    blocked_company = company_pattern(block_list(search, settings, "block_companies"))
     # LinkedIn's time filter is reliable but promoted posts sometimes slip through;
     # its dates are UTC calendar days, so allow a day of slack.
     oldest = (datetime.now(timezone.utc) - window).date() - timedelta(days=1)
 
     found: dict[str, Job] = {}
-    scanned = blocked = 0
+    scanned = blocked = loaded = 0
     stopped = None
-    for page in range(max_pages):
-        if page:
-            time.sleep(random.uniform(4, 8))
-        try:
-            html = fetch(session, SEARCH_URL, {**params, "start": page * PAGE_SIZE})
-        except (RuntimeError, OutOfTime, requests.RequestException) as e:
-            if not page:
-                raise
-            stopped = f"stopped after page {page} of {max_pages}: {e}"
+    for company, keywords in queries:
+        params = build_params(search, window, keywords)
+        from_company = company_pattern([company]) if company else None
+        for page in range(max_pages):
+            if loaded:
+                time.sleep(random.uniform(4, 8))
+            where = f" for {company}" if company else ""
+            try:
+                html = fetch(session, SEARCH_URL, {**params, "start": page * PAGE_SIZE})
+            except (RuntimeError, OutOfTime, requests.RequestException) as e:
+                if not loaded:
+                    raise
+                stopped = f"stopped after page {page} of {max_pages}{where}: {e}"
+                break
+            jobs = parse_jobs(html, name)
+            if not jobs:
+                if looks_unreadable(html):
+                    if not loaded:
+                        raise UnreadablePage("LinkedIn sent a results page with no job listings the script could read")
+                    stopped = f"stopped after page {page} of {max_pages}{where}: a results page couldn't be read"
+                break
+            loaded += 1
+            scanned += len(jobs)
+            NEWEST_JOB_ID["id"] = max(NEWEST_JOB_ID["id"], *(int(j.id) for j in jobs))
+            company_jobs = 0
+            for job in jobs:
+                if from_company and not from_company.search(job.company.lower()):
+                    continue
+                company_jobs += 1
+                if job.posted_date and job.posted_date < oldest:
+                    continue
+                words = matcher.words(job.title)
+                if must_match and not any(w <= words for w in wanted):
+                    continue
+                if must_match and WHO_CAN_APPLY_RE.search(job.title):
+                    without = matcher.words(WHO_CAN_APPLY_RE.sub(" ", job.title))
+                    job.maybe_not_coop = not any(w <= without for w in wanted)
+                if any(u and u <= words for u in unwanted) or (blocked_company and blocked_company.search(job.company.lower())):
+                    blocked += 1
+                    continue
+                found.setdefault(job.id, job)
+            if from_company and not company_jobs:
+                break  # past the company's own postings, the rest just mention its name
+        if stopped:
             break
-        jobs = parse_jobs(html, search["title"])
-        if not jobs:
-            if looks_unreadable(html):
-                if not page:
-                    raise UnreadablePage("LinkedIn sent a results page with no job listings the script could read")
-                stopped = f"stopped after page {page} of {max_pages}: a results page couldn't be read"
-            break
-        scanned += len(jobs)
-        NEWEST_JOB_ID["id"] = max(NEWEST_JOB_ID["id"], *(int(j.id) for j in jobs))
-        for job in jobs:
-            if job.posted_date and job.posted_date < oldest:
-                continue
-            words = matcher.words(job.title)
-            if must_match and not any(w <= words for w in wanted):
-                continue
-            if must_match and WHO_CAN_APPLY_RE.search(job.title):
-                without = matcher.words(WHO_CAN_APPLY_RE.sub(" ", job.title))
-                job.maybe_not_coop = not any(w <= without for w in wanted)
-            if any(u and u <= words for u in unwanted) or (blocked_company and blocked_company.search(job.company.lower())):
-                blocked += 1
-                continue
-            found.setdefault(job.id, job)
-    log(f"  scanned {scanned} listings, {len(found)} match the title filters"
+    log(f"  scanned {scanned} listings, {len(found)} "
+        + ("match the title filters" if titles else f"new postings from {', '.join(followed)}")
         + (f" ({blocked} more were blocked)" if blocked else ""))
     if stopped:
         log(f"  {stopped}; keeping what was found")
@@ -862,10 +898,11 @@ def describe_search(search: dict, settings: dict) -> str:
         if values := as_list(search.get(key)):
             parts.append(", ".join(LABELS.get(v, v.capitalize()) for v in values))
     parts.append(describe_window(parse_window(option(search, settings, "posted_within", "24h"))))
-    if also := as_list(search.get("also")):
-        parts.append("also " + ", ".join(also))
-    if option(search, settings, "similar_titles", True):
-        parts.append("similar titles")
+    if search.get("title"):  # title settings mean nothing for a search that only follows companies
+        if also := as_list(search.get("also")):
+            parts.append("also " + ", ".join(also))
+        if option(search, settings, "similar_titles", True):
+            parts.append("similar titles")
     if not option(search, settings, "include_reposts", True):
         need = int(option(search, settings, "repost_applicants", 100))
         parts.append(f"no reposts with {need}+ applicants" if need > 0 else "no reposts")
@@ -913,7 +950,7 @@ def subject(r: Report) -> str:
         if r.failures:
             return "LinkedIn job alerts: search failed"
         return "No new LinkedIn jobs today"
-    counts = ", ".join(f"{s['title']} ({len(g)})" for s, g in r.groups() if g)
+    counts = ", ".join(f"{search_name(s)} ({len(g)})" for s, g in r.groups() if g)
     return f"{plural(len(r.jobs), 'new LinkedIn job')}: {counts}"
 
 
@@ -941,7 +978,7 @@ def render_text(r: Report) -> str:
     for search, group in r.groups():
         if not group:
             continue
-        lines += [f"== {search['title']} ({len(group)}) ==", ""]
+        lines += [f"== {search_name(search)} ({len(group)}) ==", ""]
         for j in group:
             lines.append(j.title)
             lines.append("  " + " · ".join(filter(None, [j.company, where(j), j.posted, j.term, j.salary,
@@ -1007,7 +1044,7 @@ def section_html(search: dict, jobs: list[Job], settings: dict) -> str:
         f'<tr><td class="pad" style="padding:28px 32px 0">'
         f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">'
         f'<tr><td style="padding-bottom:14px">'
-        f'<span class="ink" style="color:{INK};font-size:17px;font-weight:700;line-height:24px">{escape(search["title"])}</span>'
+        f'<span class="ink" style="color:{INK};font-size:17px;font-weight:700;line-height:24px">{escape(search_name(search))}</span>'
         f'&nbsp;{pill_html(str(len(jobs))).replace("margin:8px 6px 0 0", "margin:0 0 0 4px;vertical-align:2px")}'
         f'<div class="faint" style="color:{FAINT};font-size:13px;line-height:18px;margin-top:3px">'
         f'{escape(describe_search(search, settings))}</div>'
@@ -1048,8 +1085,8 @@ def render_html(r: Report) -> str:
             f'line-height:19px">{escape(note(r))}</div></td></tr>'
         )
     body += [section_html(s, g, r.settings) for s, g in groups if g]
-    quiet = [s["title"] for s, g in groups
-             if not g and s["title"] not in r.failures + r.partial + r.unreadable_searches]
+    quiet = [search_name(s) for s, g in groups
+             if not g and search_name(s) not in r.failures + r.partial + r.unreadable_searches]
     if not n and not nothing_ran_ok(r):
         note = checkin_note(r) if r.checkin_days else "No new postings matched your searches since the last alert."
     elif quiet:
@@ -1219,32 +1256,32 @@ def main() -> int:
     failures, partial = [], []
     for i, search in enumerate(searches):
         if out_of_time():
-            log(f"Out of time; {search['title']!r} waits for the next run")
-            failures.append(search["title"])
+            log(f"Out of time; {search_name(search)!r} waits for the next run")
+            failures.append(search_name(search))
             continue
         if i:
             time.sleep(random.uniform(5, 10))
-        log(f"Searching {search['title']!r} in {search.get('location') or 'any location'}")
+        log(f"Searching {search_name(search)!r} in {search.get('location') or 'any location'}")
         try:
             jobs, stopped = run_search(session, search, settings)
         except UnreadablePage as e:
             log(f"  {e}; LinkedIn may have changed its page layout")
-            unreadable.append(search["title"])
+            unreadable.append(search_name(search))
             continue
         except Exception as e:
             log(f"  search failed: {e}")
-            failures.append(search["title"])
+            failures.append(search_name(search))
             continue
         if stopped:
-            partial.append(search["title"])
+            partial.append(search_name(search))
         fresh = merge_duplicates([j for j in jobs if j.id not in seen and j.id not in new and j.id not in skipped])
         mark_reposts(fresh, parse_window(option(search, settings, "posted_within", "24h")))
         if not option(search, settings, "include_reposts", True):
             fresh, reposts, unchecked_reposts = filter_reposts(
                 session, fresh, int(option(search, settings, "repost_applicants", 100)))
             skipped.update(job_id for j in reposts for job_id in (j.id, *j.duplicate_ids))
-            if unchecked_reposts and search["title"] not in partial:
-                partial.append(search["title"])
+            if unchecked_reposts and search_name(search) not in partial:
+                partial.append(search_name(search))
         wanted_terms = parse_terms(option(search, settings, "term", None))
         if wanted_terms and fresh:
             try:
@@ -1252,11 +1289,11 @@ def main() -> int:
                                                            option(search, settings, "require_term", False))
             except Exception as e:
                 log(f"  term check failed: {e}")
-                failures.append(search["title"])
+                failures.append(search_name(search))
                 continue
             skipped.update(job_id for j in dropped for job_id in (j.id, *j.duplicate_ids))
-            if unchecked and search["title"] not in partial:
-                partial.append(search["title"])
+            if unchecked and search_name(search) not in partial:
+                partial.append(search_name(search))
         log(f"  {len(fresh)} new since last run")
         new.update((j.id, j) for j in fresh)
 
