@@ -13,9 +13,9 @@ similar_titles = true     # also find related titles: "Software Engineer Co-op" 
                           # (false = the job title must contain your exact words)
 title_must_match = true   # LinkedIn's search also matches descriptions; this keeps only jobs whose
                           # title covers every word of the search title (or a synonym of it)
-send_when_empty = false   # also notify on days with nothing new
-checkin_days = 3          # after this many days with no email, send a short "still checking" one, which also
-                          # says if runs have been failing (0 = never, and then failing runs go unreported)
+send_when_empty = true    # also email when a run finds nothing new, so you know it ran (false = only new jobs)
+checkin_days = 3          # with send_when_empty = false: after this many days with no email, send a short
+                          # "still checking" one, which also says if runs have been failing (0 = never)
 # term = "Winter 2027"    # only co-ops/internships starting in this term, read from the title or description:
                           # Winter (Jan-Apr), Summer or Spring (May-Aug), Fall (Sep-Dec); can be a list
 # require_term = false    # true = also drop postings that don't say when they are (kept and labelled by default)
