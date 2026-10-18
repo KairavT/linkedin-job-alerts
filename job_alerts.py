@@ -1048,7 +1048,7 @@ def subject(r: Report) -> str:
         if r.checkin_days:
             return f"Still checking: no new LinkedIn jobs in {days(r.checkin_days)}"
         if none_searched(r):
-            return "LinkedIn job alerts: search failed"
+            return "LinkedIn searches didn't finish; results will be in the next run"
         return "No new LinkedIn jobs found"
     counts = ", ".join(f"{search_name(s)} ({len(g)})" for s, g in r.groups() if g)
     return f"{plural(len(r.jobs), 'new LinkedIn job')}: {counts}"
@@ -1422,13 +1422,11 @@ def main() -> int:
     run_failed = bool(failures or partial)
     state["runs_since_alert"] = state_number(state, "runs_since_alert") + 1
     state["failed_runs_since_alert"] = state_number(state, "failed_runs_since_alert") + run_failed
-    # A run that finds nothing new still emails to say so (send_when_empty), so you know it ran. Searches
-    # that didn't finish don't cause an email on their own, though: the next run's time frame overlaps
-    # this one, so it picks up whatever was missed. They're mentioned when an email goes out anyway,
-    # and the check-in email says if runs keep failing.
-    searched = len(failures) < len(searches)
-    sending = bool(report.jobs or unreadable or unreadable_descriptions
-                   or (settings.get("send_when_empty", True) and searched))
+    # Every run emails (send_when_empty), so you know it ran: new jobs, "nothing new", or, when no search
+    # could finish, that the next run will pick them up (its time frame overlaps this one). With
+    # send_when_empty = false, searches that didn't finish don't cause an email on their own; they're
+    # mentioned when an email goes out anyway, and the check-in email says if runs keep failing.
+    sending = bool(report.jobs or unreadable or unreadable_descriptions or settings.get("send_when_empty", True))
     if not sending and checkin_days and now - last_alert >= timedelta(days=checkin_days):
         report.checkin_days = checkin_days
         report.failed_runs = (state["failed_runs_since_alert"], state["runs_since_alert"])
